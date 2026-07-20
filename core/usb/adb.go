@@ -1,12 +1,12 @@
 package usb
 
 import (
-	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // type Usb
@@ -22,77 +22,85 @@ type UsbGadgetAdb struct {
 }
 
 func (this *UsbGadgetAdb) add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	output, err := gc("-a", "ffs")
-	if err != nil {
-		if len(output) == 0 {
-			output = "(no output)"
-		}
-
-		log.Printf("WARN: cannot add UsbGadgetAdb (type: %s, err: %s): %s\n", "ffs", err, output)
-		return err
-	}
-
+	// We handle gc -a ffs inside effect() so we can control the order:
+	// configfs base attrs first, then gc -a, then config/c.1 symlink.
 	return nil
 }
 
 func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	// writer := ctx.getSubpathWriter()
+	// Match the working script exactly, step by step.
+	basepath := ctx.GetBasepath()
 
-	// TODO
-	// mkdir -p <ffs_path>
-	// mount -t functionfs adb <ffs_path>
-	// set `pwd`` to `~` ($HOME), `/root` if $HOME is not set
-	// run `adbd -D` background if adbd is not running
-	// # (hack) wait adbd setup
-	// sleep 1
+	// Step 1: Clean up old gadget state
+	exec.Command("sh", "-c", fmt.Sprintf(
+		"echo '' > '%s/UDC' 2>/dev/null; rm -rf '%s'/* 2>/dev/null; mkdir -p '%s'",
+		basepath, basepath, basepath,
+	)).Run()
 
-	stat, err := os.Stat(this.ffs_path)
-	if err != nil || !stat.IsDir() {
-		err := os.MkdirAll(this.ffs_path, 0755)
-		if err != nil {
-			return fmt.Errorf("cannot create ffs_path `%s`: %w", this.ffs_path, err)
-		}
+	// Step 2: Device IDs
+	os.WriteFile(filepath.Join(basepath, "idVendor"), []byte("0x18d1\n"), 0644)
+	os.WriteFile(filepath.Join(basepath, "idProduct"), []byte("0x4ee7\n"), 0644)
+	os.WriteFile(filepath.Join(basepath, "bcdUSB"), []byte("0x0200\n"), 0644)
+	os.WriteFile(filepath.Join(basepath, "bDeviceClass"), []byte("0x00\n"), 0644)
+	os.WriteFile(filepath.Join(basepath, "bDeviceSubClass"), []byte("0x00\n"), 0644)
+	os.WriteFile(filepath.Join(basepath, "bDeviceProtocol"), []byte("0x00\n"), 0644)
+
+	// Step 3: Strings
+	os.MkdirAll(filepath.Join(basepath, "strings/0x409"), 0755)
+	os.WriteFile(filepath.Join(basepath, "strings/0x409/serialnumber"), []byte("wifi-stick-miruku\n"), 0644)
+	os.WriteFile(filepath.Join(basepath, "strings/0x409/manufacturer"), []byte("Google\n"), 0644)
+	os.WriteFile(filepath.Join(basepath, "strings/0x409/product"), []byte("ADB Gadget\n"), 0644)
+
+	// Step 4: Create FFS function (matching `gc -a ffs`)
+	if _, err := gc("-a", "ffs"); err != nil {
+		return fmt.Errorf("gc -a ffs failed: %w", err)
 	}
 
-	if adbd_process != nil {
-		if err := adbd_process.Process.Kill(); err != nil {
-			return fmt.Errorf("cannot kill old adbd: %w", err)
-		}
+	// Step 5: Create config/c.1 with symlink (scripts uses c.1, not c1.1 from gc)
+	os.MkdirAll(filepath.Join(basepath, "configs/c.1/strings/0x409"), 0755)
+	os.WriteFile(filepath.Join(basepath, "configs/c.1/strings/0x409/configuration"), []byte("adb\n"), 0644)
+	os.Symlink("../../functions/ffs.adb", filepath.Join(basepath, "configs/c.1/ffs.adb"))
 
-		_, err = adbd_process.Process.Wait()
-		if err != nil {
-			if !errors.Is(err, os.ErrProcessDone) {
-				return fmt.Errorf("wait old adbd failed: %w", err)
-			}
-		}
+	// Step 6: Mount functionfs
+	exec.Command("umount", this.ffs_path).Run()
+	os.MkdirAll(this.ffs_path, 0755)
+	if out, err := exec.Command("mount", "-t", "functionfs", "adb", this.ffs_path).CombinedOutput(); err != nil {
+		return fmt.Errorf("cannot mount functionfs: %w, output: %s", err, string(out))
 	}
 
-	process := exec.Command("mount", "-t", "functionfs", "adb", this.ffs_path)
-	if output, err := process.CombinedOutput(); err != nil {
-		return fmt.Errorf("cannot mount functionfs (adb): error: %w, output: %s", err, string(output))
-	}
+	// Step 7: Start adbd (kill old first, same as script)
+	exec.Command("killall", "adbd").Run()
+	time.Sleep(200 * time.Millisecond)
 
-	homedir, err := os.UserHomeDir()
-	if err != nil {
+	homedir, _ := os.UserHomeDir()
+	if homedir == "" {
 		homedir = "/root"
 	}
-
 	adbd_process = exec.Command("adbd", "-D")
 	adbd_process.Dir = homedir
-	err = adbd_process.Start()
-	if err != nil {
+	if err := adbd_process.Start(); err != nil {
 		return fmt.Errorf("cannot start adbd: %w", err)
+	}
+
+	// Wait for adbd to write ep0 descriptors; UDC won't bind without them.
+	time.Sleep(2 * time.Second)
+
+	// Step 8: Write UDC, then gc -e handles the rest in enableGadget()
+	udcScript := fmt.Sprintf("udc=$(ls /sys/class/udc | head -n 1); [ -n \"$udc\" ] && echo \"$udc\" > '%s/UDC'", basepath)
+	if out, err := exec.Command("sh", "-c", udcScript).CombinedOutput(); err != nil {
+		return fmt.Errorf("UDC assign failed: %w, output: %s", err, string(out))
 	}
 
 	return nil
 }
+
 
 func SnapshotUsbGadgetAdb(instance string) *UsbGadgetAdb {
 	adb := &UsbGadgetAdb{}
 	instance = strings.TrimSpace(instance)
 
 	adb.instance = instance
-	adb._type = "adb"
+	adb._type = "ffs"
 	adb.code = USB_GADGET_FUNCTION_CODE_ADB
 	return adb
 }
@@ -103,7 +111,7 @@ func NewUsbGadgetAdb(ffs_path string) *UsbGadgetAdb {
 	adb.dev_name = "adb"
 	adb.ffs_path = ffs_path
 
-	adb._type = "adb"
+	adb._type = "ffs"
 	adb.code = USB_GADGET_FUNCTION_CODE_ADB
 	return adb
 }

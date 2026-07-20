@@ -63,7 +63,20 @@ func isValidLedDevice(path string) bool {
 }
 
 func isValidConfigFs(path string) bool {
-	return isValidPath(path, "/sys/kernel/config/usb_gadget/", false)
+	if !strings.HasPrefix(path, "/sys/kernel/config/usb_gadget/") {
+		return false
+	}
+
+	stat, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		// gc -a will create the gadget directory if it doesn't exist
+		return true
+	}
+	if err != nil {
+		return false
+	}
+
+	return stat.IsDir()
 }
 
 func loadLedInterpreters(led_devnodes []string) []*led.LedInterpreter {
@@ -135,15 +148,21 @@ func main() {
 
 		log.Printf("daemon started\n")
 
-		interpreters := loadLedInterpreters(args.Daemon.Leds)
-		// led_mode_blink := led.NewLedMode().On().Wait(time.Millisecond * 500).Off().Wait(time.Millisecond * 500)
-		// led_mode_blink_faster := led.NewLedMode().On().Wait(time.Millisecond * 50).Off().Wait(time.Millisecond * 50)
-
 		input_device, err := core.NewDevice(args.Daemon.Devnode, &core.InputDeviceConfig{
 			LongTapThreshold:     args.Daemon.LongTapThreshold,
 			MultipleTapThreshold: args.Daemon.MultipleTapThreshold,
 			LongTapImmediately:   args.Daemon.LongTapImmediately,
 		})
+
+		interpreters := loadLedInterpreters(args.Daemon.Leds)
+
+		for _, interpreter := range interpreters {
+			interpreter.SetMode(led.MODE_PRESET_ON)
+			interpreter.Tick()
+			time.Sleep(time.Millisecond * 300)
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
+
 		if err != nil {
 			fatal(fmt.Sprintf("cannot create input device: %s", err))
 		}

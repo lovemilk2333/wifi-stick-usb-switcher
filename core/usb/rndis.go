@@ -2,6 +2,7 @@ package usb
 
 import (
 	"fmt"
+	"log"
 	"net/netip"
 	"os/exec"
 	"path/filepath"
@@ -27,21 +28,13 @@ type UsbGadgetRndis struct {
 
 func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
 	writer := ctx.getSubpathWriter()
-	basepath := this.getPath()
+	// Functions live under <config_fs>/functions/<type>.<instance>/, not at the root.
+	basepath := filepath.Join("functions", this.getPath())
 
 	set := func(field string, data string) {
 		if len(data) > 0 {
 			writer.WriteSubpath(base.Subpath(filepath.Join(basepath, field)), true, []byte(data))
 		}
-	}
-
-	get := func(field string) (string, error) {
-		data, err := writer.ReadSubpath(base.Subpath(filepath.Join(basepath, field)), true)
-		if err != nil {
-			return "", err
-		}
-
-		return string(data), err
 	}
 
 	set("dev_addr", this.dev_addr)
@@ -56,62 +49,38 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x02")
 	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x01")
 
-	connection_name := this.connection_prefix + this.getInstance()
+	return nil
+}
 
-	needCreateConnection := true
-	process := exec.Command("nmcli", "connection", "show", connection_name)
-	if _, err := process.CombinedOutput(); err == nil {
-		needCreateConnection = false
+// postEnable configures the RNDIS network interface.
+// This runs AFTER gc -e, so the network interface (e.g. usb0) exists.
+func (this *UsbGadgetRndis) postEnable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
+	writer := ctx.getSubpathWriter()
+	basepath := filepath.Join("functions", this.getPath())
+
+	get := func(field string) (string, error) {
+		data, err := writer.ReadSubpath(base.Subpath(filepath.Join(basepath, field)), true)
+		if err != nil {
+			return "", err
+		}
+		return string(data), err
 	}
 
 	ifname, err := get("ifname")
 	if err != nil {
-		return fmt.Errorf("cannot get ifname to create connection: %w", err)
+		return fmt.Errorf("cannot get ifname: %w", err)
 	}
 
-	if needCreateConnection {
-		process = exec.Command("nmcli", "connection", "add", "con-name", connection_name, "ifname", ifname, "type", "ethernet", "ip4", this.ip_addr.Masked().String())
-		if output, err := process.CombinedOutput(); err != nil {
-			return fmt.Errorf("cannot create connection: error: %w, output: %s", err, string(output))
-		}
+	// Set IP address and bring interface up.
+	// The script doesn't use nmcli for gadget config — use ip commands directly.
+	if out, err := exec.Command("ip", "addr", "add", this.ip_addr.Masked().String(), "dev", ifname).CombinedOutput(); err != nil {
+		// May already exist from a previous cycle; log but don't fail.
+		log.Printf("WARN: ip addr add (may already exist): %s, output: %s\n", err, string(out))
 	}
 
-	process = exec.Command("nmcli", "connection", "modify", connection_name,
-		"ipv4.route-metric", "1500",
-		"ipv4.dns-priority", "150",
-		"ipv4.method", "shared",
-	)
-	if output, err := process.CombinedOutput(); err != nil {
-		return fmt.Errorf("cannot modify connection: error: %w, output: %s", err, string(output))
+	if out, err := exec.Command("ip", "link", "set", ifname, "up").CombinedOutput(); err != nil {
+		return fmt.Errorf("cannot set link up: %w, output: %s", err, string(out))
 	}
-
-	process = exec.Command("ip", "link", "set", ifname, "up")
-	if output, err := process.CombinedOutput(); err != nil {
-		return fmt.Errorf("cannot up connection: error: %w, output: %s", err, string(output))
-	}
-
-	/*
-		if ! nmcli connection show "<connection-name>" >/dev/null 2>&1; then
-			# Create network connection
-			nmcli connection add con-name <connection-name> \
-								ifname <ifname> \
-								type ethernet \
-								ip4 <ip>
-
-			# Set priorities so it doesn't take precedence over sWiFi/mobile connections
-			nmcli connection modify <connection-name> ipv4.route-metric 1500
-			nmcli connection modify <connection-name> ipv4.dns-priority 150
-
-			# Auto connection so it can be used for tethering
-			nmcli connection modify <connection-name> ipv4.method shared
-
-			# this is optional, only for sim card
-			# user can run this in their own scripts
-			# nmcli con add con-name "modem" type "gsm" ifname "wwan0qmi0"
-
-			ip link set <ifname> up
-		fi
-	*/
 
 	return nil
 }

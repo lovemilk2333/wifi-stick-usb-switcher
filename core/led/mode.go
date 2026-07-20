@@ -58,12 +58,22 @@ func (this *LedMode) Done() *LedMode {
 		return this
 	}
 
-	if this.actions[0].action != MODE_ACTION_WAIT {
+	first_non_wait_index := 0
+	for index, action := range this.actions {
+		if action.action != MODE_ACTION_WAIT {
+			first_non_wait_index = index
+			break
+		}
+	}
+
+	if first_non_wait_index <= 0 {
 		return this
 	}
 
-	// move all actions (exclude the first one) to front one step, and move the first action to last
-	this.actions = append(this.actions[1:], this.actions[0])
+	new_actions := make([]*LedModeAction, 0, actions_length)
+	new_actions = append(new_actions, this.actions[first_non_wait_index:]...)
+	new_actions = append(new_actions, this.actions[:first_non_wait_index]...)
+	this.actions = new_actions
 
 	return this
 }

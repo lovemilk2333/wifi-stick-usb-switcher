@@ -77,6 +77,9 @@ type UsbGadgetFunction interface {
 	add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	remove(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
+	// postEnable is called after the gadget is enabled (gc -e). Use this
+	// for operations that require the network interface to exist (e.g. nmcli).
+	postEnable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 }
 
 type UsbGadgetFunctionBase struct {
@@ -108,6 +111,10 @@ func (this *UsbGadgetFunctionBase) getPath() string {
 
 func (this *UsbGadgetFunctionBase) getEffected() bool {
 	return this.effected
+}
+
+func (this *UsbGadgetFunctionBase) postEnable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
+	return nil
 }
 
 func (this *UsbGadgetFunctionBase) setEffected(effected bool) {
@@ -637,10 +644,15 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 	function_errors := make(map[string]error)
 
 	// clear all first
-	_, err := this.gc("-c")
-	if err != nil {
-		function_errors["clear_all"] = err
-		return function_errors
+	var err error
+	if this.gadget.init {
+		_, err = this.gc("-c")
+		if err != nil {
+			function_errors["clear_all"] = err
+			return function_errors
+		}
+	} else {
+		log.Printf("DEBUG: gadget not yet created, skipping gc -c\n")
 	}
 
 	functions := this.target_functions
@@ -661,6 +673,11 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 		}
 
 		function_add_status[index] = true
+
+		// gc -a may have created the gadget directory; mark it as initialized.
+		if !this.gadget.init {
+			this.gadget.init = true
+		}
 	}
 
 	safeEffect := func(index int, function UsbGadgetFunction) {
@@ -718,6 +735,19 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 		log.Printf("WARN: call `updateGadget` error (maybe parts of it): %v\n", errors)
 	}
 
+	// Sync real instances from gc -l back to our function objects.
+	// gc -a <type> auto-assigns an instance (e.g. "rndis.1"), but our
+	// functions still have the placeholder "tmp::..." instance. Without
+	// this sync, effect() writes to the wrong configfs path.
+	for _, ourFunc := range functions {
+		for _, realFunc := range this.current_functions {
+			if realFunc.getType() == ourFunc.getType() {
+				ourFunc.setInstance(realFunc.getInstance())
+				break
+			}
+		}
+	}
+
 	index = -1
 	for _, function := range functions {
 		index++
@@ -745,6 +775,11 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 }
 
 func (this *UsbGadgetController) enableGadget() error {
+	// UDC is already assigned either by:
+	//   - gc -a rndis (auto-assigns UDC)
+	//   - adb.effect()  (writes UDC after adbd init)
+	// Just run gc -e to enable the gadget.
+
 	_, err := this.gc("-e")
 	if err != nil {
 		return err
@@ -754,6 +789,13 @@ func (this *UsbGadgetController) enableGadget() error {
 }
 
 func (this *UsbGadgetController) Apply() map[string]error {
+	// Save original functions before applyFunctions overwrites target_functions
+	// with snapshot data. We need the originals for postEnable.
+	pending := make([]UsbGadgetFunction, 0, len(this.target_functions))
+	for _, f := range this.target_functions {
+		pending = append(pending, f)
+	}
+
 	errors := this.applyFunctions()
 	if errors != nil {
 		return errors
@@ -768,6 +810,13 @@ func (this *UsbGadgetController) Apply() map[string]error {
 	if err != nil {
 		return map[string]error{
 			"enable_gadget": err,
+		}
+	}
+
+	// Post-enable setup: network config for RNDIS (needs interface to exist)
+	for _, f := range pending {
+		if err := f.postEnable(this.gadget, this.gc); err != nil {
+			log.Printf("WARN: post-enable setup for `%s` failed: %s\n", f.getPath(), err)
 		}
 	}
 
@@ -811,10 +860,8 @@ func (this *UsbGadgetController) ReplaceFunction(function UsbGadgetFunction, rep
 	}
 
 	if function.getType() == RNDIS_USE_GADGET_FUNCTION {
-		err := this.rndisCheckIfname(function)
-		if err != nil {
-			return err
-		}
+		// NOTE: don't check rndis ifname here — the network interface doesn't exist
+		// until the gadget is enabled. Validation happens at effect time.
 	}
 
 	this.target_functions[target_key] = function
@@ -826,12 +873,8 @@ func (this *UsbGadgetController) ReplaceFunction(function UsbGadgetFunction, rep
 add function to `this.target_functions` or overwrite the function which have the same path
 */
 func (this *UsbGadgetController) AddFunction(function UsbGadgetFunction) error {
-	if function.getType() == RNDIS_USE_GADGET_FUNCTION {
-		err := this.rndisCheckIfname(function)
-		if err != nil {
-			return err
-		}
-	}
+	// NOTE: don't check rndis ifname here — the network interface doesn't exist
+	// until the gadget function is added and enabled via gc -e.
 
 	if function.getInstance() == "" {
 		function.setInstance("tmp::" + time.Now().UTC().Format(time.RFC3339))
@@ -859,26 +902,10 @@ func (this *UsbGadgetController) RemoveFunction(function UsbGadgetFunction) erro
 }
 
 func (this *UsbGadgetController) ClearFunctions() []error {
-	errors := this.UpdateGadget()
-	if len(errors) > 0 {
-		return errors
-	} else {
-		errors = make([]error, 0)
-	}
-
-	functions := this.GetFunctions()
-	for _, function := range functions {
-		err := this.RemoveFunction(function)
-		if err != nil {
-			errors = append(errors, err)
-		}
-	}
-
-	if len(errors) > 0 {
-		return errors
-	} else {
-		return nil
-	}
+	// Don't call gc -c here — that would delete the gadget directory.
+	// applyFunctions handles gc -c + gc -a together.
+	this.resetFunctions(true)
+	return nil
 }
 
 func NewUsbGadgetController(

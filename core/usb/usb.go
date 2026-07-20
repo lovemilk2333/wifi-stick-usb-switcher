@@ -13,6 +13,7 @@ type UsbGadgetSubpath string
 const (
 	USB_GADGET_SUBPATH_VENDOR          UsbGadgetSubpath = "idVendor"
 	USB_GADGET_SUBPATH_PRODUCT         UsbGadgetSubpath = "idProduct"
+	USB_GADGET_SUBPATH_BCD_USB         UsbGadgetSubpath = "bcdUSB"
 	USB_GADGET_SUBPATH_DEVICE_CLASS    UsbGadgetSubpath = "bDeviceClass"
 	USB_GADGET_SUBPATH_DEVICE_SUBCLASS UsbGadgetSubpath = "bDeviceSubClass"
 	USB_GADGET_SUBPATH_DEVICE_PROTOCOL UsbGadgetSubpath = "bDeviceProtocol"
