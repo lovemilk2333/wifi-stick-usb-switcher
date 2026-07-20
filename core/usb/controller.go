@@ -114,6 +114,10 @@ func (this *UsbGadgetFunctionBase) setEffected(effected bool) {
 	this.effected = effected
 }
 
+func (this *UsbGadgetFunctionBase) defaultAdd(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
+	return this.add(ctx, gc)
+}
+
 func (this *UsbGadgetFunctionBase) add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
 	_type := this.getType()
 	output, err := gc("-a", _type)
@@ -442,6 +446,7 @@ func (this *UsbGadgetController) parseGcList(gadget_id string) (string, map[stri
 			id := this.parseGcId(line)
 			if id == gadget_id {
 				state = GC_LIST_STATE_GLOBAL_FIELD
+				continue
 			} else {
 				state = GC_LIST_STATE_IGNORE
 			}
@@ -851,6 +856,29 @@ func (this *UsbGadgetController) RemoveFunction(function UsbGadgetFunction) erro
 	}
 
 	return nil
+}
+
+func (this *UsbGadgetController) ClearFunctions() []error {
+	errors := this.UpdateGadget()
+	if len(errors) > 0 {
+		return errors
+	} else {
+		errors = make([]error, 0)
+	}
+
+	functions := this.GetFunctions()
+	for _, function := range functions {
+		err := this.RemoveFunction(function)
+		if err != nil {
+			errors = append(errors, err)
+		}
+	}
+
+	if len(errors) > 0 {
+		return errors
+	} else {
+		return nil
+	}
 }
 
 func NewUsbGadgetController(

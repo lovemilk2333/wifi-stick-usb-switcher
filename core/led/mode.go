@@ -29,6 +29,10 @@ func (this *LedMode) Off() *LedMode {
 	return this
 }
 
+func (this *LedMode) OffDuration(duration time.Duration) *LedMode {
+	return this.Off().Wait(duration)
+}
+
 func (this *LedMode) On() *LedMode {
 	this.actions = append(this.actions, &LedModeAction{
 		action: MODE_ACTION_ON,
@@ -36,11 +40,31 @@ func (this *LedMode) On() *LedMode {
 	return this
 }
 
+func (this *LedMode) OnDuration(duration time.Duration) *LedMode {
+	return this.On().Wait(duration)
+}
+
 func (this *LedMode) Wait(duration time.Duration) *LedMode {
 	this.actions = append(this.actions, &LedModeAction{
 		action:   MODE_ACTION_WAIT,
 		duration: duration,
 	})
+	return this
+}
+
+func (this *LedMode) Done() *LedMode {
+	actions_length := len(this.actions)
+	if actions_length == 0 {
+		return this
+	}
+
+	if this.actions[0].action != MODE_ACTION_WAIT {
+		return this
+	}
+
+	// move all actions (exclude the first one) to front one step, and move the first action to last
+	this.actions = append(this.actions[1:], this.actions[0])
+
 	return this
 }
 
@@ -78,6 +102,6 @@ func NewLedMode() *LedMode {
 }
 
 var (
-	MODE_PRESET_ON  = NewLedMode().On()
-	MODE_PRESET_OFF = NewLedMode().Off()
+	MODE_PRESET_ON  = NewLedMode().On().Done()
+	MODE_PRESET_OFF = NewLedMode().Off().Done()
 )

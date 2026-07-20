@@ -30,7 +30,7 @@ func AdaptUsbGadgetFunction(_type string, instance string, fields map[string]str
 		rndis.qmult = fields["qmult"]
 
 		return rndis, nil
-	case "adb":
+	case "adb", "ffs": // ADB
 		adb := SnapshotUsbGadgetAdb(instance)
 		adb.dev_name = fields["dev_name"]
 

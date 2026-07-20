@@ -2,8 +2,7 @@ package usb
 
 import (
 	"fmt"
-	"log"
-	"net"
+	"net/netip"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -15,7 +14,7 @@ import (
 // type Usb
 
 type UsbGadgetRndis struct {
-	ip_addr           net.IPNet
+	ip_addr           netip.Prefix
 	connection_prefix string
 
 	dev_addr  string
@@ -36,13 +35,13 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 		}
 	}
 
-	get := func(field string) string {
+	get := func(field string) (string, error) {
 		data, err := writer.ReadSubpath(base.Subpath(filepath.Join(basepath, field)), true)
 		if err != nil {
-			return ""
+			return "", err
 		}
 
-		return string(data)
+		return string(data), err
 	}
 
 	set("dev_addr", this.dev_addr)
@@ -59,61 +58,36 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 
 	connection_name := this.connection_prefix + this.getInstance()
 
-	need_create_connection := true
+	needCreateConnection := true
 	process := exec.Command("nmcli", "connection", "show", connection_name)
-	if err := process.Start(); err != nil {
-		log.Printf("WARN: cannot run `nmcli connection show %s`: %s\n", connection_name, err)
-	} else {
-		if err := process.Wait(); err != nil {
-			if exiterr, ok := err.(*exec.ExitError); ok {
-				need_create_connection = exiterr.ExitCode() != 0
-			} else {
-				log.Printf("WARN: cannot run `nmcli connection show %s`: %s\n", connection_name, err)
-			}
+	if _, err := process.CombinedOutput(); err == nil {
+		needCreateConnection = false
+	}
+
+	ifname, err := get("ifname")
+	if err != nil {
+		return fmt.Errorf("cannot get ifname to create connection: %w", err)
+	}
+
+	if needCreateConnection {
+		process = exec.Command("nmcli", "connection", "add", "con-name", connection_name, "ifname", ifname, "type", "ethernet", "ip4", this.ip_addr.Masked().String())
+		if output, err := process.CombinedOutput(); err != nil {
+			return fmt.Errorf("cannot create connection: error: %w, output: %s", err, string(output))
 		}
 	}
 
-	ifname := get("ifname")
-
-	if ifname == "" {
-		return fmt.Errorf("cannot get ifname to create connection")
-	}
-
-	if need_create_connection {
-		process = exec.Command("nmcli", "connection", "add", "con-name", connection_name, "ifname", ifname, "type", "ethernet", "ip4", this.ip_addr.String())
-		if err := process.Start(); err != nil {
-			return fmt.Errorf("cannot create connection: %w", err)
-		} else if err := process.Wait(); err != nil {
-			return fmt.Errorf("cannot create connection: %w", err)
-		}
-	}
-
-	process = exec.Command("nmcli", "connection", "modify", connection_name, "ipv4.route-metric", "1500")
-	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot modify connection: %w", err)
-	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot modify connection: %w", err)
-	}
-
-	process = exec.Command("nmcli", "connection", "modify", connection_name, "ipv4.dns-priority", "150")
-	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot modify connection: %w", err)
-	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot modify connection: %w", err)
-	}
-
-	process = exec.Command("nmcli", "connection", "modify", connection_name, "ipv4.method", "shared")
-	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot modify connection: %w", err)
-	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot modify connection: %w", err)
+	process = exec.Command("nmcli", "connection", "modify", connection_name,
+		"ipv4.route-metric", "1500",
+		"ipv4.dns-priority", "150",
+		"ipv4.method", "shared",
+	)
+	if output, err := process.CombinedOutput(); err != nil {
+		return fmt.Errorf("cannot modify connection: error: %w, output: %s", err, string(output))
 	}
 
 	process = exec.Command("ip", "link", "set", ifname, "up")
-	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot up connection: %w", err)
-	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot up connection: %w", err)
+	if output, err := process.CombinedOutput(); err != nil {
+		return fmt.Errorf("cannot up connection: error: %w, output: %s", err, string(output))
 	}
 
 	/*
@@ -152,7 +126,7 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr net.IPNet, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr

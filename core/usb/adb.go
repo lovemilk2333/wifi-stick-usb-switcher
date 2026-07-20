@@ -3,6 +3,7 @@ package usb
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -18,6 +19,20 @@ type UsbGadgetAdb struct {
 	ffs_path string
 
 	UsbGadgetFunctionBase
+}
+
+func (this *UsbGadgetAdb) add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
+	output, err := gc("-a", "ffs")
+	if err != nil {
+		if len(output) == 0 {
+			output = "(no output)"
+		}
+
+		log.Printf("WARN: cannot add UsbGadgetAdb (type: %s, err: %s): %s\n", "ffs", err, output)
+		return err
+	}
+
+	return nil
 }
 
 func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
@@ -39,22 +54,22 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 		}
 	}
 
-	if err := adbd_process.Process.Kill(); err != nil {
-		return fmt.Errorf("cannot kill old adbd: %w", err)
-	}
+	if adbd_process != nil {
+		if err := adbd_process.Process.Kill(); err != nil {
+			return fmt.Errorf("cannot kill old adbd: %w", err)
+		}
 
-	_, err = adbd_process.Process.Wait()
-	if err != nil {
-		if !errors.Is(err, os.ErrProcessDone) {
-			return fmt.Errorf("wait old adbd failed: %w", err)
+		_, err = adbd_process.Process.Wait()
+		if err != nil {
+			if !errors.Is(err, os.ErrProcessDone) {
+				return fmt.Errorf("wait old adbd failed: %w", err)
+			}
 		}
 	}
 
-	process := exec.Command("mount", "t", "functionfs", "adb", this.ffs_path)
-	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot mount functionfs (adb): %w", err)
-	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot mount functionfs (adb): %w", err)
+	process := exec.Command("mount", "-t", "functionfs", "adb", this.ffs_path)
+	if output, err := process.CombinedOutput(); err != nil {
+		return fmt.Errorf("cannot mount functionfs (adb): error: %w, output: %s", err, string(output))
 	}
 
 	homedir, err := os.UserHomeDir()

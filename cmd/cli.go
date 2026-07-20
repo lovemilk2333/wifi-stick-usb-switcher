@@ -14,21 +14,22 @@ import (
 	"github.com/alexflint/go-arg"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/led"
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/usb"
 )
 
 type DaemonCmd struct {
-	Devnode              string        `arg:"-d,required" help:"button devnode path"`
-	LongTapImmediately   bool          `arg:"--long-tap-immediately" default:"true" help:"emit long-tap when pressing time >= LongTapThreshold, even button is still pressing"`
-	LongTapThreshold     time.Duration `arg:"--long-tap-threshold" default:"500ms" help:"the threshold of long-tap, such as 500ms, 1s"`
-	MultipleTapThreshold time.Duration `arg:"--multiple-tap-threshold" default:"500ms" help:"the threshold of multiple-tap, lower than zero means disable, such as 500ms, 1s"`
-	AutoConfirmThreshold time.Duration `arg:"--auto-confirm-threshold" default:"5s" help:"the threshold that auto confirm mode switch"`
-	Leds                 []string      `arg:"-l,--led,separate" help:"led path, such as /sys/class/leds/blue:wifi"`
-	UsbConfigFs          string        `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
-	// UsbIfname            string        `arg:"-i,--ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
-	GcPath         string           `arg:"-g,--gc-path" default:"gc" help:"gadget controller (https://github.com/HandsomeMod/gc) path or ELF name which can be found in $PATH"`
-	RndisDeviceMac net.HardwareAddr `arg:"--rndis-device-mac" default:"" help:"the mac address of current device rndis network interface"`
-	RndisHostMac   net.HardwareAddr `arg:"--rndis-host-mac" default:"" help:"the network interface mac address of the device which connected to rndis can see"`
-	RndisIP        netip.Prefix     `arg:"-a --rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
+	Devnode              string           `arg:"-d,required" help:"button devnode path"`
+	LongTapImmediately   bool             `arg:"--long-tap-immediately" default:"true" help:"emit long-tap when pressing time >= LongTapThreshold, even button is still pressing"`
+	LongTapThreshold     time.Duration    `arg:"--long-tap-threshold" default:"500ms" help:"the threshold of long-tap, such as 500ms, 1s"`
+	MultipleTapThreshold time.Duration    `arg:"--multiple-tap-threshold" default:"500ms" help:"the threshold of multiple-tap, lower than zero means disable, such as 500ms, 1s"`
+	AutoConfirmThreshold time.Duration    `arg:"--auto-confirm-threshold" default:"5s" help:"the threshold that auto confirm mode switch"`
+	Leds                 []string         `arg:"-l,--led,separate" help:"led path, such as /sys/class/leds/blue:wifi"`
+	UsbConfigFs          string           `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
+	GcPath               string           `arg:"-g,--gc-path" default:"gc" help:"gadget controller (https://github.com/HandsomeMod/gc) path or ELF name which can be found in $PATH"`
+	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:00:00:11:22:33" help:"the mac address of current device rndis network interface"`
+	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:00:00:44:55:66" help:"the network interface mac address of the device which connected to rndis can see"`
+	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
+	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
 }
 
 var args struct {
@@ -117,6 +118,11 @@ func main() {
 			}
 		}
 
+		rndis_ip, err := netip.ParsePrefix(args.Daemon.RndisIP)
+		if err != nil {
+			fatal(fmt.Sprintf("`%s` is not valid IP address", args.Daemon.RndisIP))
+		}
+
 		// if args.DaemonCmd.LongTapThreshold <= 0 {
 		// 	log.Println("WARN: invalid LONG-TAP-THRESHOLD, use default")
 		// 	args.DaemonCmd.LongTapThreshold = time.Millisecond * 500
@@ -130,8 +136,8 @@ func main() {
 		log.Printf("daemon started\n")
 
 		interpreters := loadLedInterpreters(args.Daemon.Leds)
-		led_mode_blink := led.NewLedMode().On().Wait(time.Millisecond * 500).Off().Wait(time.Millisecond * 500)
-		led_mode_blink_faster := led.NewLedMode().On().Wait(time.Millisecond * 50).Off().Wait(time.Millisecond * 50)
+		// led_mode_blink := led.NewLedMode().On().Wait(time.Millisecond * 500).Off().Wait(time.Millisecond * 500)
+		// led_mode_blink_faster := led.NewLedMode().On().Wait(time.Millisecond * 50).Off().Wait(time.Millisecond * 50)
 
 		input_device, err := core.NewDevice(args.Daemon.Devnode, &core.InputDeviceConfig{
 			LongTapThreshold:     args.Daemon.LongTapThreshold,
@@ -149,9 +155,25 @@ func main() {
 
 		input_device.StartDaemon()
 
-		for {
-			interpreters[0].Tick()
+		controller, err := usb.NewUsbGadgetController(args.Daemon.UsbConfigFs, args.Daemon.GcPath)
+		if err != nil {
+			fatal(fmt.Sprintf("cannot init usb gadget: %s", err))
+		}
 
+		errors := controller.ClearFunctions()
+		if errors != nil {
+			fatal(fmt.Sprintf("cannot clear usb gadget functions: %v", errors))
+		}
+
+		mode := 0
+		modes := []usb.UsbGadgetFunction{
+			usb.NewUsbGadgetRndis(rndis_ip, "rndis_", args.Daemon.RndisDeviceMac.String(), args.Daemon.RndisHostMac.String(), args.Daemon.RndisUsbIfname, ""),
+			usb.NewUsbGadgetAdb("/dev/usb-ffs/adb"),
+		}
+		modes_length := len(modes)
+		mode_changed := false
+
+		for {
 			for _, event := range input_device.Tick() {
 				log.Printf("%+v\n", event)
 
@@ -161,18 +183,50 @@ func main() {
 
 				switch event.Type {
 				case core.INPUT_TAP:
-					if interpreters[0].GetMode() == led.MODE_PRESET_ON {
-						interpreters[0].SetMode(led.MODE_PRESET_OFF)
-					} else {
-						interpreters[0].SetMode(led.MODE_PRESET_ON)
-					}
+					mode += 1
+					mode %= modes_length
+					mode_changed = true
 				case core.INPUT_LONG_TAP:
-					interpreters[0].SetMode(led_mode_blink)
+					mode -= 1
+					mode %= modes_length
+					if mode < 0 {
+						mode += modes_length
+					}
+					mode_changed = true
 				case core.INPUT_MULTIPLE_TAP:
-					interpreters[0].SetMode(led_mode_blink_faster)
+					// TODO
 				case core.INPUT_ERROR:
 					// TODO WARNING
 				}
+			}
+
+			if mode_changed {
+				if errors := controller.ClearFunctions(); errors != nil {
+					log.Printf("WARN: cannot clear functions: %v\n", errors)
+				}
+
+				if err = controller.AddFunction(modes[mode]); err != nil {
+					log.Printf("WARN: cannot add function: %v\n", err)
+				}
+
+				if errors := controller.Apply(); errors != nil {
+					log.Printf("WARN: cannot apply functions: %v\n", errors)
+				}
+
+				if errors := controller.UpdateGadget(); errors != nil {
+					log.Printf("WARN: cannot update gadget: %v\n", errors)
+				}
+
+				for _, interpreter := range interpreters {
+					interpreter.SetMode(led.MODE_PRESET_OFF)
+				}
+				interpreters[mode].SetMode(led.MODE_PRESET_ON)
+
+				mode_changed = false
+			}
+
+			for _, interpreter := range interpreters {
+				interpreter.Tick()
 			}
 
 			time.Sleep(time.Millisecond * 10)
