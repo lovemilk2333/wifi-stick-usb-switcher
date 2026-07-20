@@ -1,0 +1,9 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+
+mutagen sync create --name=wifi-stick-usb-switcher-arm64-dev \
+  ./build/arm64 \
+  wifi:'/root/wifi-stick-usb-switcher' \
+  -m one-way-safe \
+  --permissions-mode=portable \

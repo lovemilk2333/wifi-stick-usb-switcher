@@ -1,0 +1,183 @@
+package main
+
+// TODO use standard log system
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"net/netip"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/alexflint/go-arg"
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core"
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/led"
+)
+
+type DaemonCmd struct {
+	Devnode              string        `arg:"-d,required" help:"button devnode path"`
+	LongTapImmediately   bool          `arg:"--long-tap-immediately" default:"true" help:"emit long-tap when pressing time >= LongTapThreshold, even button is still pressing"`
+	LongTapThreshold     time.Duration `arg:"--long-tap-threshold" default:"500ms" help:"the threshold of long-tap, such as 500ms, 1s"`
+	MultipleTapThreshold time.Duration `arg:"--multiple-tap-threshold" default:"500ms" help:"the threshold of multiple-tap, lower than zero means disable, such as 500ms, 1s"`
+	AutoConfirmThreshold time.Duration `arg:"--auto-confirm-threshold" default:"5s" help:"the threshold that auto confirm mode switch"`
+	Leds                 []string      `arg:"-l,--led,separate" help:"led path, such as /sys/class/leds/blue:wifi"`
+	UsbConfigFs          string        `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
+	// UsbIfname            string        `arg:"-i,--ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
+	GcPath         string           `arg:"-g,--gc-path" default:"gc" help:"gadget controller (https://github.com/HandsomeMod/gc) path or ELF name which can be found in $PATH"`
+	RndisDeviceMac net.HardwareAddr `arg:"--rndis-device-mac" default:"" help:"the mac address of current device rndis network interface"`
+	RndisHostMac   net.HardwareAddr `arg:"--rndis-host-mac" default:"" help:"the network interface mac address of the device which connected to rndis can see"`
+	RndisIP        netip.Prefix     `arg:"-a --rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
+}
+
+var args struct {
+	Daemon *DaemonCmd `arg:"subcommand:daemon"`
+}
+
+func isValidPath(path string, base string, file_required bool) bool {
+	if !strings.HasPrefix(path, base) {
+		return false
+	}
+
+	stat, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
+	}
+
+	is_dir := stat.IsDir()
+	if (file_required && is_dir) || (!file_required && !is_dir) {
+		return false
+	}
+
+	return true
+}
+
+func isValidCharDevice(path string) bool {
+	return isValidPath(path, "/dev/input/", true)
+}
+
+func isValidLedDevice(path string) bool {
+	return isValidPath(path, "/sys/class/leds/", false)
+}
+
+func isValidConfigFs(path string) bool {
+	return isValidPath(path, "/sys/kernel/config/usb_gadget/", false)
+}
+
+func loadLedInterpreters(led_devnodes []string) []*led.LedInterpreter {
+	interpreters := make([]*led.LedInterpreter, len(led_devnodes))
+
+	for index, led_devnode := range led_devnodes {
+		led_device, err := led.NewLed(led_devnode)
+		if err != nil {
+			log.Printf("WARN: cannot create Led device for node `%s`: %s\n", led_devnode, err.Error())
+			continue
+		}
+		interpreter := led.NewLedInterpreter(led_device)
+		err = interpreter.SetMode(led.MODE_PRESET_OFF)
+		if err != nil {
+			log.Printf("WARN: cannot init LedInterpreter for node `%s`: %s\n", led_devnode, err.Error())
+			continue
+		}
+
+		interpreters[index] = interpreter
+	}
+
+	return interpreters
+}
+
+func fatal(message string) {
+	log.Fatal("FATAL: " + message + "\n")
+	os.Exit(1)
+}
+
+// TODO handle SIGNALs
+// TODO cover panic
+
+func main() {
+	parser := arg.MustParse(&args)
+
+	switch {
+	case args.Daemon != nil:
+		// TODO 这里的逻辑丢到专门的 Daemon
+		if !isValidCharDevice(args.Daemon.Devnode) {
+			fatal(fmt.Sprintf("`%s` is not a valid input device", args.Daemon.Devnode))
+		}
+
+		if !isValidConfigFs(args.Daemon.UsbConfigFs) {
+			fatal(fmt.Sprintf("`%s` is not valid config fs", args.Daemon.UsbConfigFs))
+		}
+
+		if args.Daemon.Leds != nil {
+			for _, led_devnode := range args.Daemon.Leds {
+				if !isValidLedDevice(led_devnode) {
+					fatal(fmt.Sprintf("`%s` is not a valid led device\n", led_devnode))
+				}
+			}
+		}
+
+		// if args.DaemonCmd.LongTapThreshold <= 0 {
+		// 	log.Println("WARN: invalid LONG-TAP-THRESHOLD, use default")
+		// 	args.DaemonCmd.LongTapThreshold = time.Millisecond * 500
+		// }
+
+		// if args.DaemonCmd.AutoConfirmThreshold <= 0 {
+		// 	log.Println("WARN: invalid AUTO-CONFIRM-THRESHOLD, use default")
+		// 	args.DaemonCmd.AutoConfirmThreshold = time.Second * 5
+		// }
+
+		log.Printf("daemon started\n")
+
+		interpreters := loadLedInterpreters(args.Daemon.Leds)
+		led_mode_blink := led.NewLedMode().On().Wait(time.Millisecond * 500).Off().Wait(time.Millisecond * 500)
+		led_mode_blink_faster := led.NewLedMode().On().Wait(time.Millisecond * 50).Off().Wait(time.Millisecond * 50)
+
+		input_device, err := core.NewDevice(args.Daemon.Devnode, &core.InputDeviceConfig{
+			LongTapThreshold:     args.Daemon.LongTapThreshold,
+			MultipleTapThreshold: args.Daemon.MultipleTapThreshold,
+			LongTapImmediately:   args.Daemon.LongTapImmediately,
+		})
+		if err != nil {
+			fatal(fmt.Sprintf("cannot create input device: %s", err.Error()))
+		}
+
+		status, err := input_device.Open()
+		if status != core.DEVICE_STATUS_NORMAL {
+			fatal(fmt.Sprintf("cannot open input device (%d): %s", status, err.Error()))
+		}
+
+		input_device.StartDaemon()
+
+		for {
+			interpreters[0].Tick()
+
+			for _, event := range input_device.Tick() {
+				log.Printf("%+v\n", event)
+
+				if event.Status != core.DEVICE_STATUS_NORMAL {
+					fatal(event.Error.Error())
+				}
+
+				switch event.Type {
+				case core.INPUT_TAP:
+					if interpreters[0].GetMode() == led.MODE_PRESET_ON {
+						interpreters[0].SetMode(led.MODE_PRESET_OFF)
+					} else {
+						interpreters[0].SetMode(led.MODE_PRESET_ON)
+					}
+				case core.INPUT_LONG_TAP:
+					interpreters[0].SetMode(led_mode_blink)
+				case core.INPUT_MULTIPLE_TAP:
+					interpreters[0].SetMode(led_mode_blink_faster)
+				case core.INPUT_ERROR:
+					// TODO WARNING
+				}
+			}
+
+			time.Sleep(time.Millisecond * 10)
+		}
+	default:
+		parser.WriteHelp(os.Stdout)
+	}
+}

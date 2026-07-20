@@ -1,0 +1,281 @@
+package core
+
+import (
+	"container/list"
+	"errors"
+	"fmt"
+	"sync"
+	"syscall"
+	"time"
+
+	evdev "github.com/gvalkov/golang-evdev"
+)
+
+type InputEventType string
+
+const (
+	INPUT_TAP          InputEventType = "tap"
+	INPUT_MULTIPLE_TAP InputEventType = "multiple-tap"
+	INPUT_LONG_TAP     InputEventType = "long-tap"
+	INPUT_ERROR        InputEventType = "error"
+)
+
+type InputEvent struct {
+	Time          time.Time
+	Devnode       string
+	Type          InputEventType
+	PressDuration time.Duration
+	TapCount      uint
+	Error         error
+	Status        InputDeviceExitStatus
+}
+
+type InputDeviceExitStatus int
+
+const (
+	DEVICE_STATUS_NORMAL InputDeviceExitStatus = iota
+	DEVICE_STATUS_DEVICE_REMOVED
+	DEVICE_ERROR_OPEN_DEVICE
+	DEVICE_ERROR_GRAB_DEVICE
+	DEVICE_ERROR_READ_EVENT
+	DEVICE_ERROR_NIL_DEVICE
+	DEVICE_ERROR_RELEASE
+)
+
+type InputDeviceConfig struct {
+	LongTapThreshold     time.Duration
+	MultipleTapThreshold time.Duration
+	TickRate             uint16
+}
+
+type InputDevice struct {
+	Devnode string
+	Config  *InputDeviceConfig
+
+	device     *evdev.InputDevice
+	pressed    bool
+	pressStart time.Time
+
+	mu    sync.Mutex
+	queue *list.List
+
+	stop chan struct{}
+}
+
+func NewDevice(devnode string, cfg *InputDeviceConfig) *InputDevice {
+	if cfg.LongTapThreshold <= 0 {
+		cfg.LongTapThreshold = 500 * time.Millisecond
+	}
+	if cfg.MultipleTapThreshold <= 0 {
+		cfg.MultipleTapThreshold = 500 * time.Millisecond
+	}
+	if cfg.TickRate == 0 {
+		cfg.TickRate = 100
+	}
+
+	return &InputDevice{
+		Devnode: devnode,
+		Config:  cfg,
+		queue:   list.New(),
+	}
+}
+
+func (d *InputDevice) Open() (InputDeviceExitStatus, error) {
+	dev, err := evdev.Open(d.Devnode)
+	if err != nil {
+		return DEVICE_ERROR_OPEN_DEVICE, err
+	}
+
+	if err := dev.Grab(); err != nil {
+		return DEVICE_ERROR_GRAB_DEVICE, err
+	}
+
+	d.device = dev
+	d.stop = make(chan struct{})
+
+	return DEVICE_STATUS_NORMAL, nil
+}
+
+func (d *InputDevice) Close() (InputDeviceExitStatus, error) {
+	if d.device == nil {
+		return DEVICE_ERROR_NIL_DEVICE, fmt.Errorf("device is nil")
+	}
+
+	err := d.device.Release()
+	if err != nil {
+		return DEVICE_ERROR_RELEASE, err
+	}
+
+	d.device = nil
+	close(d.stop)
+
+	return DEVICE_STATUS_NORMAL, nil
+}
+
+func (d *InputDevice) StartDaemon() {
+	go d.daemon()
+}
+
+// ======================== DAEMON ========================
+
+func (d *InputDevice) daemon() {
+	for {
+		select {
+		case <-d.stop:
+			return
+		default:
+		}
+
+		if d.device == nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		evs, err := d.device.Read()
+		if err != nil {
+			if errors.Is(err, syscall.ENODEV) {
+				return
+			}
+			continue
+		}
+
+		for _, ev := range evs {
+			if ev.Type != evdev.EV_KEY {
+				continue
+			}
+
+			t := time.Unix(int64(ev.Time.Sec), int64(ev.Time.Usec)*1000)
+
+			switch ev.Value {
+			case 1: // DOWN
+				if d.pressed {
+					continue
+				}
+				d.pressed = true
+				d.pressStart = t
+
+			case 0: // UP
+				if !d.pressed {
+					continue
+				}
+				d.pressed = false
+
+				e := &InputEvent{
+					Devnode:  d.Devnode,
+					Time:     t,
+					TapCount: 1,
+					Status:   DEVICE_STATUS_NORMAL,
+				}
+
+				dur := t.Sub(d.pressStart)
+
+				if dur >= d.Config.LongTapThreshold {
+					e.Type = INPUT_LONG_TAP
+					e.PressDuration = dur
+				} else {
+					e.Type = INPUT_TAP
+				}
+
+				d.mu.Lock()
+				d.queue.PushBack(e)
+				d.mu.Unlock()
+			}
+		}
+	}
+}
+
+// ======================== TICK / STATE MACHINE ========================
+
+func (d *InputDevice) Tick() []*InputEvent {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := time.Now()
+
+	if d.queue.Len() == 0 {
+		return nil
+	}
+
+	var out []*InputEvent
+	var chain []*InputEvent
+
+	peekAll := func() []*InputEvent {
+		var res []*InputEvent
+		for e := d.queue.Front(); e != nil; e = e.Next() {
+			res = append(res, e.Value.(*InputEvent))
+		}
+		return res
+	}
+
+	evs := peekAll()
+
+	d.queue.Init() // ⚠️关键：一次性消费，不要边遍历边删
+
+	for _, ev := range evs {
+
+		// 非 tap 直接输出
+		if ev.Type != INPUT_TAP {
+			if len(chain) > 0 {
+				flushChain(chain, &out)
+				chain = chain[:0]
+			}
+			out = append(out, ev)
+			continue
+		}
+
+		chain = append(chain, ev)
+	}
+
+	// ✔ 窗口判定（关键修复）
+	if len(chain) > 0 {
+		last := chain[len(chain)-1]
+
+		if now.Sub(last.Time) >= d.Config.MultipleTapThreshold {
+			flushChain(chain, &out)
+		} else {
+			// ❗关键：未成熟的 tap 不输出（避免丢）
+			// 放回 queue 等下一轮
+			for _, ev := range chain {
+				d.queue.PushBack(ev)
+			}
+		}
+	}
+
+	return out
+}
+
+func splitChain(chain []*InputEvent, max uint) [][]*InputEvent {
+	if len(chain) == 0 {
+		return nil
+	}
+
+	var result [][]*InputEvent
+
+	for len(chain) > 0 {
+		if len(chain) <= int(max) {
+			result = append(result, chain)
+			break
+		}
+
+		result = append(result, chain[:max])
+		chain = chain[max:]
+	}
+
+	return result
+}
+
+func flushChain(chain []*InputEvent, out *[]*InputEvent) {
+	if len(chain) == 1 {
+		e := *chain[0]
+		e.Type = INPUT_TAP
+		e.TapCount = 1
+		*out = append(*out, &e)
+		return
+	}
+
+	last := chain[len(chain)-1]
+	e := *last
+	e.Type = INPUT_MULTIPLE_TAP
+	e.TapCount = uint(len(chain))
+	*out = append(*out, &e)
+}

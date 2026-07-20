@@ -1,0 +1,209 @@
+package core
+
+import (
+	"log"
+	"math"
+	"time"
+
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/led"
+)
+
+type LedManagerState uint64
+
+type LedManager struct {
+	state      LedManagerState
+	led_states []byte
+	// when `DefaultOn` is `true`, state is `0` means open the first LED, close all LEDs otherwise
+	DefaultOn bool
+	LedLength int
+	Leds      []*led.Led
+}
+
+/*
+Wrote by Gemini
+*/
+func (mgr *LedManager) ApplyState() LedManagerState {
+	// // 1. 动态计算或修正 LedLength
+	// if mgr.LedLength == 0 {
+	// 	for index, led := range mgr.Leds {
+	// 		if led == nil {
+	// 			mgr.LedLength = index
+	// 			break
+	// 		}
+	// 	}
+	// }
+
+	length := mgr.LedLength
+	if length == 0 {
+		return mgr.state
+	}
+
+	// 2. 根据长度初始化或重置位图大小，并全部清零 (默认关闭所有灯)
+	neededBytes := (length + 7) / 8
+	if len(mgr.led_states) != neededBytes {
+		mgr.led_states = make([]byte, neededBytes)
+	} else {
+		for i := range mgr.led_states {
+			mgr.led_states[i] = 0
+		}
+	}
+
+	// 辅助函数：在位图中将指定 index 的 bit 设为 1 (点亮)
+	setBit := func(index int) {
+		byteIdx := index / 8
+		bitIdx := index % 8
+		mgr.led_states[byteIdx] |= (1 << bitIdx)
+	}
+
+	// 3. 计算组合总数与状态回滚
+	maxCombinations := length + (length * (length - 1) / 2)
+
+	var maxStates uint64
+	if mgr.DefaultOn {
+		maxStates = uint64(maxCombinations)
+	} else {
+		maxStates = uint64(maxCombinations + 1)
+	}
+
+	effectiveState := uint64(mgr.state) % maxStates
+
+	// 4. 核心逻辑：根据状态置位 bitmap
+	if !mgr.DefaultOn && effectiveState == 0 {
+		// DefaultOn 为 false 且 state 为 0 -> 全部不开，保持 led_states 全零即可
+	} else {
+		combinationIdx := effectiveState
+		if !mgr.DefaultOn {
+			combinationIdx = effectiveState - 1 // 扣除全关的状态 0
+		}
+
+		if combinationIdx < uint64(length) {
+			// 单灯阶段：点亮对应的某一个 bit
+			setBit(int(combinationIdx))
+		} else {
+			// 双灯阶段：点亮对应的两个 bit
+			offset := combinationIdx - uint64(length)
+			count := uint64(0)
+			found := false
+
+			for i := 0; i < length; i++ {
+				for j := i + 1; j < length; j++ {
+					if count == offset {
+						setBit(i)
+						setBit(j)
+						found = true
+						break
+					}
+					count++
+				}
+				if found {
+					break
+				}
+			}
+		}
+	}
+
+	// 5. 遍历位图，实际执行开/关灯
+	var err error
+	for index := 0; index < length; index++ {
+		led := mgr.Leds[index]
+		if led == nil {
+			continue
+		}
+
+		// 从位图中读取当前的 bit 状态
+		byteIdx := index / 8
+		bitIdx := index % 8
+		need_open := (mgr.led_states[byteIdx] & (1 << bitIdx)) != 0
+
+		if need_open {
+			err = led.AlwaysOn()
+		} else {
+			err = led.AlwaysOff()
+		}
+
+		if err != nil {
+			log.Printf("WARN: cannot set led `%s` (need_open: %v) state: %s\n", led.devnode, need_open, err.Error())
+		}
+	}
+
+	return mgr.state
+}
+
+func (mgr *LedManager) NextState() LedManagerState {
+	if mgr.state == math.MaxUint64-1 {
+		mgr.state = 0
+	} else {
+		mgr.state++
+	}
+	return mgr.ApplyState()
+}
+
+func (mgr *LedManager) LastState() LedManagerState {
+	if mgr.state == 0 {
+		mgr.state = math.MaxUint64
+	} else {
+		mgr.state--
+	}
+	return mgr.ApplyState()
+}
+
+func (mgr *LedManager) SetState(state LedManagerState) LedManagerState {
+	mgr.state = state
+	return mgr.ApplyState()
+}
+
+func (mgr *LedManager) FirstState() LedManagerState {
+	return mgr.SetState(0)
+}
+
+func (mgr *LedManager) LoopLeds(per_led_delay time.Duration) {
+	// mgr.CloseAll()
+	// time.Sleep(per_led_delay)
+	// mgr.ApplyState()
+
+	maxState := LedManagerState(mgr.LedLength)
+	if mgr.DefaultOn {
+		maxState -= 1
+	}
+	for mgr.state < maxState {
+		time.Sleep(per_led_delay)
+		mgr.NextState()
+	}
+
+	time.Sleep(per_led_delay)
+	mgr.FirstState()
+}
+
+func (mgr *LedManager) CloseAll() {
+	var err error
+	length := mgr.LedLength
+
+	for index := 0; index < length; index++ {
+		led := mgr.Leds[index]
+		if led == nil {
+			continue
+		}
+
+		err = led.AlwaysOff()
+		if err != nil {
+			log.Printf("WARN: CloseAll cannot close led `%s`: %s\n", led.devnode, err.Error())
+		}
+	}
+}
+
+func (mgr *LedManager) OpenAll() {
+	var err error
+	length := mgr.LedLength
+
+	for index := 0; index < length; index++ {
+		led := mgr.Leds[index]
+		if led == nil {
+			continue
+		}
+
+		err = led.AlwaysOn()
+		if err != nil {
+			log.Printf("WARN: CloseAll cannot close led `%s`: %s\n", led.devnode, err.Error())
+		}
+	}
+}
