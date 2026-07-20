@@ -35,7 +35,7 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 	if err != nil || !stat.IsDir() {
 		err := os.MkdirAll(this.ffs_path, 0755)
 		if err != nil {
-			return fmt.Errorf("cannot create ffs_path `%s`: %s", this.ffs_path, err.Error())
+			return fmt.Errorf("cannot create ffs_path `%s`: %w", this.ffs_path, err)
 		}
 	}
 
@@ -52,9 +52,9 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 
 	process := exec.Command("mount", "t", "functionfs", "adb", this.ffs_path)
 	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot mount functionfs (adb): %s", err.Error())
+		return fmt.Errorf("cannot mount functionfs (adb): %w", err)
 	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot mount functionfs (adb): %s", err.Error())
+		return fmt.Errorf("cannot mount functionfs (adb): %w", err)
 	}
 
 	homedir, err := os.UserHomeDir()

@@ -71,13 +71,13 @@ func loadLedInterpreters(led_devnodes []string) []*led.LedInterpreter {
 	for index, led_devnode := range led_devnodes {
 		led_device, err := led.NewLed(led_devnode)
 		if err != nil {
-			log.Printf("WARN: cannot create Led device for node `%s`: %s\n", led_devnode, err.Error())
+			log.Printf("WARN: cannot create Led device for node `%s`: %s\n", led_devnode, err)
 			continue
 		}
 		interpreter := led.NewLedInterpreter(led_device)
 		err = interpreter.SetMode(led.MODE_PRESET_OFF)
 		if err != nil {
-			log.Printf("WARN: cannot init LedInterpreter for node `%s`: %s\n", led_devnode, err.Error())
+			log.Printf("WARN: cannot init LedInterpreter for node `%s`: %s\n", led_devnode, err)
 			continue
 		}
 
@@ -139,12 +139,12 @@ func main() {
 			LongTapImmediately:   args.Daemon.LongTapImmediately,
 		})
 		if err != nil {
-			fatal(fmt.Sprintf("cannot create input device: %s", err.Error()))
+			fatal(fmt.Sprintf("cannot create input device: %s", err))
 		}
 
 		status, err := input_device.Open()
 		if status != core.DEVICE_STATUS_NORMAL {
-			fatal(fmt.Sprintf("cannot open input device (%d): %s", status, err.Error()))
+			fatal(fmt.Sprintf("cannot open input device (%d): %s", status, err))
 		}
 
 		input_device.StartDaemon()

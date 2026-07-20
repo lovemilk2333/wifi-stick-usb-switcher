@@ -98,7 +98,7 @@ func (this *LedInterpreter) SetMode(mode *LedMode) error {
 
 	err := this.initMode()
 	if err != nil {
-		log.Printf("WARN: cannot init LedMode when set: %s\n", err.Error())
+		log.Printf("WARN: cannot init LedMode when set: %s\n", err)
 		return err
 	}
 

@@ -30,13 +30,13 @@ subpath_required: `path` must have subpath (not equals to `base`) if true
 func (this *PathChecker) IsValidPath(path string, base string, file_required bool, subpath_required bool) PathStatus {
 	abs_path, err := filepath.Abs(path)
 	if err != nil {
-		log.Printf("WARN: cannot get absolute path `%s`: %s", path, err.Error())
+		log.Printf("WARN: cannot get absolute path `%s`: %s", path, err)
 		return PATH_ERROR_ABSOLUTE_FAILED
 	}
 
 	abs_base, err := filepath.Abs(base)
 	if err != nil {
-		log.Printf("WARN: cannot get absolute path `%s`: %s", base, err.Error())
+		log.Printf("WARN: cannot get absolute path `%s`: %s", base, err)
 		return PATH_ERROR_ABSOLUTE_FAILED
 	}
 
@@ -58,7 +58,7 @@ func (this *PathChecker) IsValidPath(path string, base string, file_required boo
 		if os.IsNotExist(err) {
 			return PATH_ERROR_NOT_EXISTS
 		}
-		log.Printf("WARN: cannot stat path `%s`: %s", abs_path, err.Error())
+		log.Printf("WARN: cannot stat path `%s`: %s", abs_path, err)
 		return PATH_ERROR_STAT_FAILED
 	}
 

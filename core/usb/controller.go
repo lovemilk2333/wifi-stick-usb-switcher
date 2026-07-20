@@ -122,7 +122,7 @@ func (this *UsbGadgetFunctionBase) add(ctx UsbGadgetContext, gc func(args ...str
 			output = "(no output)"
 		}
 
-		log.Printf("WARN: cannot add UsbGadgetFunction (type: %s, err: %s): %s\n", _type, err.Error(), output)
+		log.Printf("WARN: cannot add UsbGadgetFunction (type: %s, err: %s): %s\n", _type, err, output)
 		return err
 	}
 
@@ -145,7 +145,7 @@ func (this *UsbGadgetFunctionBase) remove(ctx UsbGadgetContext, gc func(args ...
 			output = "(no output)"
 		}
 
-		log.Printf("WARN: cannot remove UsbGadgetFunction (type: %s, err: %s): %s\n", this.getType(), err.Error(), output)
+		log.Printf("WARN: cannot remove UsbGadgetFunction (type: %s, err: %s): %s\n", this.getType(), err, output)
 		return err
 	}
 
@@ -194,7 +194,7 @@ func (this *UsbGadgetController) checkGc() error {
 	if !filepath.IsAbs(gc_path_normalized) {
 		gc_path_abs, err := exec.LookPath(this.gc_path)
 		if err != nil {
-			return fmt.Errorf("cannot find gc ELF: %s", err.Error())
+			return fmt.Errorf("cannot find gc ELF: %w", err)
 		}
 
 		gc_path = gc_path_abs
@@ -204,7 +204,7 @@ func (this *UsbGadgetController) checkGc() error {
 
 	_, err := elf.Open(gc_path)
 	if err != nil {
-		return fmt.Errorf("invalid gc ELF: %s", err.Error())
+		return fmt.Errorf("invalid gc ELF: %w", err)
 	}
 
 	this.gc_path = gc_path
@@ -239,7 +239,7 @@ const RNDIS_USE_GADGET_FUNCTION = "rndis"
 
 // 	_, err = net.InterfaceByName(ifname)
 // 	if err != nil {
-// 		return fmt.Errorf("cannot access UsbGadgetFunction rndis ifname %s: %s", ifname, err.Error())
+// 		return fmt.Errorf("cannot access UsbGadgetFunction rndis ifname %s: %w", ifname, err)
 // 	}
 
 // 	return nil
@@ -263,7 +263,7 @@ func (this *UsbGadgetController) rndisCheckIfname(function UsbGadgetFunction) er
 
 	_, err := net.InterfaceByName(ifname)
 	if err != nil {
-		return fmt.Errorf("cannot access UsbGadgetFunction rndis ifname %s: %s", ifname, err.Error())
+		return fmt.Errorf("cannot access UsbGadgetFunction rndis ifname %s: %w", ifname, err)
 	}
 
 	return nil
@@ -412,7 +412,7 @@ func (this *UsbGadgetController) parseGcList(gadget_id string) (string, map[stri
 
 	output, err := this.gc("-l")
 	if err != nil {
-		errors = append(errors, fmt.Errorf("cannot get `gc -l` output: %s", err.Error()))
+		errors = append(errors, fmt.Errorf("cannot get `gc -l` output: %w", err))
 		return "", nil, nil, nil, errors
 	}
 

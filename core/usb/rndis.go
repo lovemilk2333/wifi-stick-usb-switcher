@@ -62,13 +62,13 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 	need_create_connection := true
 	process := exec.Command("nmcli", "connection", "show", connection_name)
 	if err := process.Start(); err != nil {
-		log.Printf("WARN: cannot run `nmcli connection show %s`: %s\n", connection_name, err.Error())
+		log.Printf("WARN: cannot run `nmcli connection show %s`: %s\n", connection_name, err)
 	} else {
 		if err := process.Wait(); err != nil {
 			if exiterr, ok := err.(*exec.ExitError); ok {
 				need_create_connection = exiterr.ExitCode() != 0
 			} else {
-				log.Printf("WARN: cannot run `nmcli connection show %s`: %s\n", connection_name, err.Error())
+				log.Printf("WARN: cannot run `nmcli connection show %s`: %s\n", connection_name, err)
 			}
 		}
 	}
@@ -82,38 +82,38 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 	if need_create_connection {
 		process = exec.Command("nmcli", "connection", "add", "con-name", connection_name, "ifname", ifname, "type", "ethernet", "ip4", this.ip_addr.String())
 		if err := process.Start(); err != nil {
-			return fmt.Errorf("cannot create connection: %s", err.Error())
+			return fmt.Errorf("cannot create connection: %w", err)
 		} else if err := process.Wait(); err != nil {
-			return fmt.Errorf("cannot create connection: %s", err.Error())
+			return fmt.Errorf("cannot create connection: %w", err)
 		}
 	}
 
 	process = exec.Command("nmcli", "connection", "modify", connection_name, "ipv4.route-metric", "1500")
 	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot modify connection: %s", err.Error())
+		return fmt.Errorf("cannot modify connection: %w", err)
 	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot modify connection: %s", err.Error())
+		return fmt.Errorf("cannot modify connection: %w", err)
 	}
 
 	process = exec.Command("nmcli", "connection", "modify", connection_name, "ipv4.dns-priority", "150")
 	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot modify connection: %s", err.Error())
+		return fmt.Errorf("cannot modify connection: %w", err)
 	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot modify connection: %s", err.Error())
+		return fmt.Errorf("cannot modify connection: %w", err)
 	}
 
 	process = exec.Command("nmcli", "connection", "modify", connection_name, "ipv4.method", "shared")
 	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot modify connection: %s", err.Error())
+		return fmt.Errorf("cannot modify connection: %w", err)
 	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot modify connection: %s", err.Error())
+		return fmt.Errorf("cannot modify connection: %w", err)
 	}
 
 	process = exec.Command("ip", "link", "set", ifname, "up")
 	if err := process.Start(); err != nil {
-		return fmt.Errorf("cannot up connection: %s", err.Error())
+		return fmt.Errorf("cannot up connection: %w", err)
 	} else if err := process.Wait(); err != nil {
-		return fmt.Errorf("cannot up connection: %s", err.Error())
+		return fmt.Errorf("cannot up connection: %w", err)
 	}
 
 	/*
