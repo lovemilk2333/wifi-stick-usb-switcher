@@ -2,6 +2,7 @@ package usb
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,22 +39,40 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 	)).Run()
 
 	// Step 2: Device IDs
-	os.WriteFile(filepath.Join(basepath, "idVendor"), []byte("0x18d1\n"), 0644)
-	os.WriteFile(filepath.Join(basepath, "idProduct"), []byte("0x4ee7\n"), 0644)
-	os.WriteFile(filepath.Join(basepath, "bcdUSB"), []byte("0x0200\n"), 0644)
-	os.WriteFile(filepath.Join(basepath, "bDeviceClass"), []byte("0x00\n"), 0644)
-	os.WriteFile(filepath.Join(basepath, "bDeviceSubClass"), []byte("0x00\n"), 0644)
-	os.WriteFile(filepath.Join(basepath, "bDeviceProtocol"), []byte("0x00\n"), 0644)
+	ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x18d1")
+	ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x4ee7")
+	ctx.setAttr(USB_GADGET_SUBPATH_BCD_USB, "0x0200")
+	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0x00")
+	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x00")
+	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x00")
 
-	// Step 3: Strings
-	os.MkdirAll(filepath.Join(basepath, "strings/0x409"), 0755)
-	os.WriteFile(filepath.Join(basepath, "strings/0x409/serialnumber"), []byte("wifi-stick-miruku\n"), 0644)
-	os.WriteFile(filepath.Join(basepath, "strings/0x409/manufacturer"), []byte("Google\n"), 0644)
-	os.WriteFile(filepath.Join(basepath, "strings/0x409/product"), []byte("ADB Gadget\n"), 0644)
+	// Step 3: Strings — must be written BEFORE gc -a ffs (matching the script order).
+	log.Printf("DEBUG adb: writing strings before gc -a, language=%q\n", ctx.getLanguage())
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, "wifi-stick-miruku"); err != nil {
+		log.Printf("ERROR adb: setLanguageStrings serialnumber failed: %s\n", err)
+	}
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, "Google"); err != nil {
+		log.Printf("ERROR adb: setLanguageStrings manufacturer failed: %s\n", err)
+	}
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, "ADB Gadget"); err != nil {
+		log.Printf("ERROR adb: setLanguageStrings product failed: %s\n", err)
+	}
 
-	// Step 4: Create FFS function (matching `gc -a ffs`)
+	// Step 4: Create FFS function
+	log.Printf("DEBUG adb: running gc -a ffs\n")
 	if _, err := gc("-a", "ffs"); err != nil {
 		return fmt.Errorf("gc -a ffs failed: %w", err)
+	}
+
+	// Verify strings after gc -a ffs
+	log.Printf("DEBUG adb: verifying strings after gc -a...\n")
+	for _, f := range []string{"serialnumber", "manufacturer", "product"} {
+		data, err := os.ReadFile(filepath.Join(basepath, "strings/"+ctx.getLanguage()+"/"+f))
+		if err != nil {
+			log.Printf("DEBUG adb: verify read %s FAILED: %s\n", f, err)
+		} else {
+			log.Printf("DEBUG adb: verify read %s = %q\n", f, strings.TrimSpace(string(data)))
+		}
 	}
 
 	// Step 5: Create config/c.1 with symlink (scripts uses c.1, not c1.1 from gc)
@@ -93,7 +112,6 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 
 	return nil
 }
-
 
 func SnapshotUsbGadgetAdb(instance string) *UsbGadgetAdb {
 	adb := &UsbGadgetAdb{}

@@ -2,6 +2,8 @@ package usb
 
 import (
 	"fmt"
+	"log"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
@@ -132,6 +134,7 @@ func (this *UsbGadget) getStringsSubpath(subpath UsbGadgetSubpathStrings) UsbGad
 	language := this.state["language"]
 	if language == "" {
 		this.initLanguage()
+		language = this.state["language"]
 	}
 
 	full_subpath := UsbGadgetSubpath("strings/" + language + "/" + string(subpath))
@@ -154,10 +157,26 @@ func (this *UsbGadget) getLanguageStrings(subpath UsbGadgetSubpathStrings, value
 
 func (this *UsbGadget) setLanguageStrings(subpath UsbGadgetSubpathStrings, value string) error {
 	full_subpath := base.Subpath(this.getStringsSubpath(subpath))
-	err := this.WriteSubpath(full_subpath, false, []byte(value))
+
+	// On configfs, the strings/<lang>/ directory must exist before its
+	// attribute files are writable. Use shell to create it and write the
+	// value — shell echo handles configfs quirks that os.WriteFile can't
+	// (os.WriteFile uses O_CREATE which configfs rejects for virtual files).
+	langDir := filepath.Dir(string(full_subpath))
+	fullDirPath := filepath.Join(this.Basepath, langDir)
+	fullFilePath := filepath.Join(this.Basepath, string(full_subpath))
+	script := fmt.Sprintf("mkdir -p '%s' && echo '%s' > '%s'",
+		fullDirPath, value, fullFilePath)
+
+	log.Printf("DEBUG setLanguageStrings: lang=%q subpath=%q dir=%q file=%q script=%q\n",
+		this.state["language"], subpath, fullDirPath, fullFilePath, script)
+
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
 	if err != nil {
-		return err
+		log.Printf("ERROR setLanguageStrings FAILED: %s, output: %s\n", err, string(out))
+		return fmt.Errorf("cannot write language string: %w, output: %s", err, string(out))
 	}
+	log.Printf("DEBUG setLanguageStrings OK: wrote %q to %s\n", value, fullFilePath)
 
 	this.state[string(full_subpath)] = value
 	return nil

@@ -2,7 +2,6 @@ package usb
 
 import (
 	"fmt"
-	"log"
 	"net/netip"
 	"os/exec"
 	"path/filepath"
@@ -71,15 +70,39 @@ func (this *UsbGadgetRndis) postEnable(ctx UsbGadgetContext, gc func(args ...str
 		return fmt.Errorf("cannot get ifname: %w", err)
 	}
 
-	// Set IP address and bring interface up.
-	// The script doesn't use nmcli for gadget config — use ip commands directly.
-	if out, err := exec.Command("ip", "addr", "add", this.ip_addr.Masked().String(), "dev", ifname).CombinedOutput(); err != nil {
-		// May already exist from a previous cycle; log but don't fail.
-		log.Printf("WARN: ip addr add (may already exist): %s, output: %s\n", err, string(out))
+	// Create a NetworkManager connection with shared mode so the host
+	// gets an IP via DHCP (10.22.33.x) and the device gets NAT/sharing.
+	connection_name := this.connection_prefix + this.getInstance()
+
+	output, err := exec.Command("nmcli", "connection", "show", connection_name).CombinedOutput()
+	exists := err == nil
+
+	if !exists {
+		output, err = exec.Command("nmcli", "connection", "add",
+			"con-name", connection_name,
+			"ifname", ifname,
+			"type", "ethernet",
+			"ip4", this.ip_addr.Masked().String(),
+		).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("cannot add nmcli connection: %w, output: %s", err, string(output))
+		}
 	}
 
-	if out, err := exec.Command("ip", "link", "set", ifname, "up").CombinedOutput(); err != nil {
-		return fmt.Errorf("cannot set link up: %w, output: %s", err, string(out))
+	// Switch to shared mode (DHCP + NAT on the device side)
+	output, err = exec.Command("nmcli", "connection", "modify", connection_name,
+		"ipv4.route-metric", "1500",
+		"ipv4.dns-priority", "150",
+		"ipv4.method", "shared",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("cannot modify nmcli connection: %w, output: %s", err, string(output))
+	}
+
+	// Bring up the connection
+	output, err = exec.Command("nmcli", "connection", "up", connection_name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("cannot up nmcli connection: %w, output: %s", err, string(output))
 	}
 
 	return nil
