@@ -17,6 +17,8 @@ import (
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/usb"
 )
 
+const PROJECT_IDENT = "miruku-wifi-stick-usb-switcher"
+
 type DaemonCmd struct {
 	Devnode              string           `arg:"-d,required" help:"button devnode path"`
 	LongTapImmediately   bool             `arg:"--long-tap-immediately" default:"true" help:"emit long-tap when pressing time >= LongTapThreshold, even button is still pressing"`
@@ -186,7 +188,7 @@ func main() {
 
 		mode := 0
 		modes := []usb.UsbGadgetFunction{
-			usb.NewUsbGadgetRndis(rndis_ip, "miruku-wifi-", args.Daemon.RndisDeviceMac.String(), args.Daemon.RndisHostMac.String(), args.Daemon.RndisUsbIfname, ""),
+			usb.NewUsbGadgetRndis(rndis_ip, PROJECT_IDENT+"_", args.Daemon.RndisDeviceMac.String(), args.Daemon.RndisHostMac.String(), args.Daemon.RndisUsbIfname, ""),
 			usb.NewUsbGadgetAdb("/dev/usb-ffs/adb"),
 		}
 		modes_length := len(modes)
