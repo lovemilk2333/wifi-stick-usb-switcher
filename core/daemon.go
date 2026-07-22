@@ -1,0 +1,229 @@
+package core
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"net/netip"
+	"time"
+
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/input"
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/led"
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/usb"
+)
+
+const PROJECT_IDENT = "miruku-wifi-stick-usb-switcher"
+
+type DaemonCmd struct {
+	Devnode              string           `arg:"-d,required" help:"button devnode path"`
+	LongTapImmediately   bool             `arg:"--long-tap-immediately" default:"true" help:"emit long-tap when pressing time >= LongTapThreshold, even button is still pressing"`
+	LongTapThreshold     time.Duration    `arg:"--long-tap-threshold" default:"500ms" help:"the threshold of long-tap, such as 500ms, 1s"`
+	MultipleTapThreshold time.Duration    `arg:"--multiple-tap-threshold" default:"500ms" help:"the threshold of multiple-tap, lower than zero means disable, such as 500ms, 1s"`
+	AutoConfirmThreshold time.Duration    `arg:"--auto-confirm-threshold" default:"5s" help:"the threshold that auto confirm mode switch"`
+	Leds                 []string         `arg:"-l,--led,separate" help:"led path, such as /sys/class/leds/blue:wifi"`
+	UsbConfigFs          string           `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
+	GcPath               string           `arg:"-g,--gc-path" default:"gc" help:"gadget controller (https://github.com/HandsomeMod/gc) path or ELF name which can be found in $PATH"`
+	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
+	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
+	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
+	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
+	// TickRate             time.Duration    `arg:"--tick-rate" default:"10ms" help:"daemon event loop tick rate"`
+}
+
+type Daemon struct {
+	base.PathChecker
+
+	input_device *input.InputDevice
+	controller   *usb.UsbGadgetController
+	interpreters []*led.LedInterpreter
+	modes        []usb.UsbGadgetFunction
+	current_mode int
+	mode_changed bool
+	tick_rate    time.Duration
+}
+
+func NewDaemon(cmd DaemonCmd, tick_rate time.Duration) (*Daemon, error) {
+	daemon := &Daemon{}
+	daemon.tick_rate = tick_rate
+	if err := daemon.init(cmd); err != nil {
+		return nil, err
+	}
+	return daemon, nil
+}
+
+// Mainloop runs the daemon event loop at the configured tick rate.
+func (this *Daemon) Mainloop() {
+	log.Printf("daemon started\n")
+	ticker := time.NewTicker(this.tick_rate)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		this.Tick()
+	}
+}
+
+// init validates cmd and stores all initialised handles on the Daemon struct.
+func (this *Daemon) init(cmd DaemonCmd) error {
+	// ---- validate arguments ------------------------------------------------
+
+	if this.IsValidPath(cmd.Devnode, "/dev/input/", true, true) != base.PATH_STATUS_OK {
+		return fmt.Errorf("`%s` is not a valid input device", cmd.Devnode)
+	}
+
+	if !this.isValidConfigFs(cmd.UsbConfigFs) {
+		return fmt.Errorf("`%s` is not a valid config fs", cmd.UsbConfigFs)
+	}
+
+	if cmd.Leds != nil {
+		for _, ledDevnode := range cmd.Leds {
+			if this.IsValidPath(ledDevnode, "/sys/class/leds/", false, true) != base.PATH_STATUS_OK {
+				return fmt.Errorf("`%s` is not a valid led device", ledDevnode)
+			}
+		}
+	}
+
+	rndisIP, err := netip.ParsePrefix(cmd.RndisIP)
+	if err != nil {
+		return fmt.Errorf("`%s` is not a valid IP address", cmd.RndisIP)
+	}
+
+	// ---- initialise input device ------------------------------------------
+
+	inputDevice, err := input.NewDevice(cmd.Devnode, &input.InputDeviceConfig{
+		LongTapThreshold:     cmd.LongTapThreshold,
+		MultipleTapThreshold: cmd.MultipleTapThreshold,
+		LongTapImmediately:   cmd.LongTapImmediately,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot create input device: %w", err)
+	}
+
+	status, err := inputDevice.Open()
+	if status != input.DEVICE_STATUS_NORMAL {
+		return fmt.Errorf("cannot open input device (%d): %w", status, err)
+	}
+
+	inputDevice.StartDaemon()
+	this.input_device = inputDevice
+
+	// ---- initialise USB gadget controller ---------------------------------
+
+	controller, err := usb.NewUsbGadgetController(cmd.UsbConfigFs, cmd.GcPath)
+	if err != nil {
+		return fmt.Errorf("cannot init usb gadget: %w", err)
+	}
+
+	if errs := controller.ClearFunctions(); errs != nil {
+		return fmt.Errorf("cannot clear usb gadget functions: %v", errs)
+	}
+
+	this.controller = controller
+
+	// ---- prepare modes ----------------------------------------------------
+
+	this.modes = []usb.UsbGadgetFunction{
+		usb.NewUsbGadgetRndis(rndisIP, PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, ""),
+		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb"),
+	}
+
+	// ---- initialise LEDs --------------------------------------------------
+
+	this.interpreters = loadLedInterpreters(cmd.Leds)
+
+	for _, interpreter := range this.interpreters {
+		interpreter.SetMode(led.MODE_PRESET_ON)
+		interpreter.Tick()
+		time.Sleep(time.Millisecond * 500)
+		interpreter.SetMode(led.MODE_PRESET_OFF)
+	}
+
+	return nil
+}
+
+func (this *Daemon) Tick() {
+	for _, event := range this.input_device.Tick() {
+		log.Printf("%+v\n", event)
+
+		if event.Status != input.DEVICE_STATUS_NORMAL {
+			log.Fatalf("FATAL: %s\n", event.Error.Error())
+		}
+
+		switch event.Type {
+		case input.INPUT_TAP:
+			this.current_mode++
+			this.current_mode %= len(this.modes)
+			this.mode_changed = true
+		case input.INPUT_LONG_TAP:
+			this.current_mode--
+			this.current_mode %= len(this.modes)
+			if this.current_mode < 0 {
+				this.current_mode += len(this.modes)
+			}
+			this.mode_changed = true
+		case input.INPUT_MULTIPLE_TAP:
+			// TODO
+		case input.INPUT_ERROR:
+			// TODO WARNING
+		}
+	}
+
+	if this.mode_changed {
+		if errs := this.controller.ClearFunctions(); errs != nil {
+			log.Printf("WARN: cannot clear functions: %v\n", errs)
+		}
+
+		if err := this.controller.AddFunction(this.modes[this.current_mode]); err != nil {
+			log.Printf("WARN: cannot add function: %v\n", err)
+		}
+
+		if errs := this.controller.Apply(); errs != nil {
+			log.Printf("WARN: cannot apply functions: %v\n", errs)
+		}
+
+		if errs := this.controller.UpdateGadget(); errs != nil {
+			log.Printf("WARN: cannot update gadget: %v\n", errs)
+		}
+
+		for _, interpreter := range this.interpreters {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
+		this.interpreters[this.current_mode].SetMode(led.MODE_PRESET_ON)
+
+		this.mode_changed = false
+	}
+
+	for _, interpreter := range this.interpreters {
+		interpreter.Tick()
+	}
+}
+
+func loadLedInterpreters(ledDevnodes []string) []*led.LedInterpreter {
+	interpreters := make([]*led.LedInterpreter, len(ledDevnodes))
+
+	for index, ledDevnode := range ledDevnodes {
+		ledDevice, err := led.NewLed(ledDevnode)
+		if err != nil {
+			log.Printf("WARN: cannot create Led device for node `%s`: %s\n", ledDevnode, err)
+			continue
+		}
+		interpreter := led.NewLedInterpreter(ledDevice)
+		err = interpreter.SetMode(led.MODE_PRESET_OFF)
+		if err != nil {
+			log.Printf("WARN: cannot init LedInterpreter for node `%s`: %s\n", ledDevnode, err)
+			continue
+		}
+
+		interpreters[index] = interpreter
+	}
+
+	return interpreters
+}
+
+func (this *Daemon) isValidConfigFs(path string) bool {
+	status := this.IsValidPath(path, "/sys/kernel/config/usb_gadget/", false, true)
+	if status == base.PATH_ERROR_NOT_EXISTS {
+		return true // gc -a will create the gadget directory
+	}
+	return status == base.PATH_STATUS_OK
+}
