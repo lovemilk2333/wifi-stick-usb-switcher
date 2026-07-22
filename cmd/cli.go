@@ -26,8 +26,8 @@ type DaemonCmd struct {
 	Leds                 []string         `arg:"-l,--led,separate" help:"led path, such as /sys/class/leds/blue:wifi"`
 	UsbConfigFs          string           `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
 	GcPath               string           `arg:"-g,--gc-path" default:"gc" help:"gadget controller (https://github.com/HandsomeMod/gc) path or ELF name which can be found in $PATH"`
-	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:00:00:11:22:33" help:"the mac address of current device rndis network interface"`
-	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:00:00:44:55:66" help:"the network interface mac address of the device which connected to rndis can see"`
+	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
+	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
 }
@@ -159,7 +159,7 @@ func main() {
 		for _, interpreter := range interpreters {
 			interpreter.SetMode(led.MODE_PRESET_ON)
 			interpreter.Tick()
-			time.Sleep(time.Millisecond * 300)
+			time.Sleep(time.Millisecond * 500)
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
 
@@ -186,7 +186,7 @@ func main() {
 
 		mode := 0
 		modes := []usb.UsbGadgetFunction{
-			usb.NewUsbGadgetRndis(rndis_ip, "rndis_", args.Daemon.RndisDeviceMac.String(), args.Daemon.RndisHostMac.String(), args.Daemon.RndisUsbIfname, ""),
+			usb.NewUsbGadgetRndis(rndis_ip, "miruku-wifi-", args.Daemon.RndisDeviceMac.String(), args.Daemon.RndisHostMac.String(), args.Daemon.RndisUsbIfname, ""),
 			usb.NewUsbGadgetAdb("/dev/usb-ffs/adb"),
 		}
 		modes_length := len(modes)

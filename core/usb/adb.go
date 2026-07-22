@@ -2,10 +2,8 @@ package usb
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -22,73 +20,63 @@ type UsbGadgetAdb struct {
 	UsbGadgetFunctionBase
 }
 
-func (this *UsbGadgetAdb) add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	// We handle gc -a ffs inside effect() so we can control the order:
-	// configfs base attrs first, then gc -a, then config/c.1 symlink.
-	return nil
-}
+// add uses gc -a ffs, inherited from UsbGadgetFunctionBase, to create the
+// FFS function.  gc handles the gadget directory, config, and function
+// symlink; effect() writes the subpath overrides and performs the FFS-
+// specific setup (mount, adbd).
 
 func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	// Match the working script exactly, step by step.
 	basepath := ctx.GetBasepath()
 
-	// Step 1: Clean up old gadget state
-	exec.Command("sh", "-c", fmt.Sprintf(
-		"echo '' > '%s/UDC' 2>/dev/null; rm -rf '%s'/* 2>/dev/null; mkdir -p '%s'",
-		basepath, basepath, basepath,
-	)).Run()
+	instance := this.getInstance()
+	if instance == "" {
+		return fmt.Errorf("adb instance not set after gc -a")
+	}
 
-	// Step 2: Device IDs
-	ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x18d1")
-	ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x4ee7")
-	ctx.setAttr(USB_GADGET_SUBPATH_BCD_USB, "0x0200")
-	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0x00")
-	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x00")
-	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x00")
+	// Override device IDs and class codes — gc defaults differ from the
+	// ADB-mode values (Google 0x18d1:0x4ee7).
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x18d1"); err != nil {
+		return fmt.Errorf("write idVendor: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x4ee7"); err != nil {
+		return fmt.Errorf("write idProduct: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_BCD_USB, "0x0200"); err != nil {
+		return fmt.Errorf("write bcdUSB: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0x00"); err != nil {
+		return fmt.Errorf("write bDeviceClass: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x00"); err != nil {
+		return fmt.Errorf("write bDeviceSubClass: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x00"); err != nil {
+		return fmt.Errorf("write bDeviceProtocol: %w", err)
+	}
 
-	// Step 3: Strings — must be written BEFORE gc -a ffs (matching the script order).
-	log.Printf("DEBUG adb: writing strings before gc -a, language=%q\n", ctx.getLanguage())
+	// Override strings.
 	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, "wifi-stick-miruku"); err != nil {
-		log.Printf("ERROR adb: setLanguageStrings serialnumber failed: %s\n", err)
+		return fmt.Errorf("write serialnumber: %w", err)
 	}
 	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, "Google"); err != nil {
-		log.Printf("ERROR adb: setLanguageStrings manufacturer failed: %s\n", err)
+		return fmt.Errorf("write manufacturer: %w", err)
 	}
 	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, "ADB Gadget"); err != nil {
-		log.Printf("ERROR adb: setLanguageStrings product failed: %s\n", err)
+		return fmt.Errorf("write product: %w", err)
 	}
 
-	// Step 4: Create FFS function
-	log.Printf("DEBUG adb: running gc -a ffs\n")
-	if _, err := gc("-a", "ffs"); err != nil {
-		return fmt.Errorf("gc -a ffs failed: %w", err)
+	// Mount functionfs for adbd.
+	umountCmd := exec.Command("umount", this.ffs_path)
+	_ = umountCmd.Run() // ignore error — not mounted yet
+	if err := os.MkdirAll(this.ffs_path, 0755); err != nil {
+		return fmt.Errorf("mkdir ffs path: %w", err)
 	}
-
-	// Verify strings after gc -a ffs
-	log.Printf("DEBUG adb: verifying strings after gc -a...\n")
-	for _, f := range []string{"serialnumber", "manufacturer", "product"} {
-		data, err := os.ReadFile(filepath.Join(basepath, "strings/"+ctx.getLanguage()+"/"+f))
-		if err != nil {
-			log.Printf("DEBUG adb: verify read %s FAILED: %s\n", f, err)
-		} else {
-			log.Printf("DEBUG adb: verify read %s = %q\n", f, strings.TrimSpace(string(data)))
-		}
-	}
-
-	// Step 5: Create config/c.1 with symlink (scripts uses c.1, not c1.1 from gc)
-	os.MkdirAll(filepath.Join(basepath, "configs/c.1/strings/0x409"), 0755)
-	os.WriteFile(filepath.Join(basepath, "configs/c.1/strings/0x409/configuration"), []byte("adb\n"), 0644)
-	os.Symlink("../../functions/ffs.adb", filepath.Join(basepath, "configs/c.1/ffs.adb"))
-
-	// Step 6: Mount functionfs
-	exec.Command("umount", this.ffs_path).Run()
-	os.MkdirAll(this.ffs_path, 0755)
 	if out, err := exec.Command("mount", "-t", "functionfs", "adb", this.ffs_path).CombinedOutput(); err != nil {
-		return fmt.Errorf("cannot mount functionfs: %w, output: %s", err, string(out))
+		return fmt.Errorf("mount functionfs failed: %w, output: %s", err, string(out))
 	}
 
-	// Step 7: Start adbd (kill old first, same as script)
-	exec.Command("killall", "adbd").Run()
+	// Kill any previous adbd, then start a fresh one.
+	_ = exec.Command("killall", "adbd").Run()
 	time.Sleep(200 * time.Millisecond)
 
 	homedir, _ := os.UserHomeDir()
@@ -98,14 +86,18 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 	adbd_process = exec.Command("adbd", "-D")
 	adbd_process.Dir = homedir
 	if err := adbd_process.Start(); err != nil {
-		return fmt.Errorf("cannot start adbd: %w", err)
+		return fmt.Errorf("start adbd: %w", err)
 	}
 
-	// Wait for adbd to write ep0 descriptors; UDC won't bind without them.
-	time.Sleep(2 * time.Second)
+	// Wait for adbd to write its ep0 descriptors; UDC won't bind without
+	// them.
+	time.Sleep(1 * time.Second)
 
-	// Step 8: Write UDC, then gc -e handles the rest in enableGadget()
-	udcScript := fmt.Sprintf("udc=$(ls /sys/class/udc | head -n 1); [ -n \"$udc\" ] && echo \"$udc\" > '%s/UDC'", basepath)
+	// Write UDC.
+	udcScript := fmt.Sprintf(
+		"udc=$(ls /sys/class/udc | head -n 1); [ -n \"$udc\" ] && echo \"$udc\" > '%s/UDC'",
+		basepath,
+	)
 	if out, err := exec.Command("sh", "-c", udcScript).CombinedOutput(); err != nil {
 		return fmt.Errorf("UDC assign failed: %w, output: %s", err, string(out))
 	}

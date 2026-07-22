@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 )
 
-// TODO
+// TODO fix RNDIS DHCP not work
 // type Usb
 
 type UsbGadgetRndis struct {
@@ -25,88 +24,73 @@ type UsbGadgetRndis struct {
 	UsbGadgetFunctionBase
 }
 
+// add uses gc -a rndis, inherited from UsbGadgetFunctionBase, to create the
+// RNDIS function.  gc handles the gadget directory, config, OS descriptors
+// and the function symlink; effect() only writes the subpath overrides.
+
 func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	writer := ctx.getSubpathWriter()
-	// Functions live under <config_fs>/functions/<type>.<instance>/, not at the root.
-	basepath := filepath.Join("functions", this.getPath())
+	basepath := ctx.GetBasepath()
 
-	set := func(field string, data string) {
-		if len(data) > 0 {
-			writer.WriteSubpath(base.Subpath(filepath.Join(basepath, field)), true, []byte(data))
-		}
+	instance := this.getInstance()
+	if instance == "" {
+		return fmt.Errorf("rndis instance not set after gc -a")
 	}
 
-	set("dev_addr", this.dev_addr)
-	set("host_addr", this.host_addr)
-	set("ifname", this.ifname)
-	set("qmult", this.qmult)
-
-	// TODO handle errors
-	ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x1d6b")
-	ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x0104")
-	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0xEF")
-	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x02")
-	ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x01")
-
-	return nil
-}
-
-// postEnable configures the RNDIS network interface.
-// This runs AFTER gc -e, so the network interface (e.g. usb0) exists.
-func (this *UsbGadgetRndis) postEnable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	writer := ctx.getSubpathWriter()
-	basepath := filepath.Join("functions", this.getPath())
-
-	get := func(field string) (string, error) {
-		data, err := writer.ReadSubpath(base.Subpath(filepath.Join(basepath, field)), true)
-		if err != nil {
-			return "", err
-		}
-		return string(data), err
+	// Override device IDs and class codes — gc defaults (from cmake config)
+	// differ from the RNDIS-mode values we need.
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x1d6b"); err != nil {
+		return fmt.Errorf("write idVendor: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x0104"); err != nil {
+		return fmt.Errorf("write idProduct: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_BCD_USB, "0x0200"); err != nil {
+		return fmt.Errorf("write bcdUSB: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0xEF"); err != nil {
+		return fmt.Errorf("write bDeviceClass: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x02"); err != nil {
+		return fmt.Errorf("write bDeviceSubClass: %w", err)
+	}
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x01"); err != nil {
+		return fmt.Errorf("write bDeviceProtocol: %w", err)
 	}
 
-	ifname, err := get("ifname")
-	if err != nil {
-		return fmt.Errorf("cannot get ifname: %w", err)
+	// Override strings (gc defaults are generic HandsomeMod strings).
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, "wifi-stick-miruku"); err != nil {
+		return fmt.Errorf("write serialnumber: %w", err)
+	}
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, "wifi-stick"); err != nil {
+		return fmt.Errorf("write manufacturer: %w", err)
+	}
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, "RNDIS Ethernet"); err != nil {
+		return fmt.Errorf("write product: %w", err)
 	}
 
-	// Create a NetworkManager connection with shared mode so the host
-	// gets an IP via DHCP (10.22.33.x) and the device gets NAT/sharing.
-	connection_name := this.connection_prefix + this.getInstance()
+	// Override function subpath fields — dev_addr / host_addr.
+	devAddrPath := functionSubpath(this._type, instance, "dev_addr")
+	hostAddrPath := functionSubpath(this._type, instance, "host_addr")
 
-	output, err := exec.Command("nmcli", "connection", "show", connection_name).CombinedOutput()
-	exists := err == nil
-
-	if !exists {
-		output, err = exec.Command("nmcli", "connection", "add",
-			"con-name", connection_name,
-			"ifname", ifname,
-			"type", "ethernet",
-			"ip4", this.ip_addr.Masked().String(),
-		).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("cannot add nmcli connection: %w, output: %s", err, string(output))
-		}
+	if err := ctx.WriteSubpath(base.Subpath(devAddrPath), true, []byte(this.dev_addr+"\n")); err != nil {
+		return fmt.Errorf("write rndis dev_addr: %w", err)
+	}
+	if err := ctx.WriteSubpath(base.Subpath(hostAddrPath), true, []byte(this.host_addr+"\n")); err != nil {
+		return fmt.Errorf("write rndis host_addr: %w", err)
 	}
 
-	// Switch to shared mode (DHCP + NAT on the device side)
-	output, err = exec.Command("nmcli", "connection", "modify", connection_name,
-		"ipv4.route-metric", "1500",
-		"ipv4.dns-priority", "150",
-		"ipv4.method", "shared",
-	).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cannot modify nmcli connection: %w, output: %s", err, string(output))
-	}
-
-	// Bring up the connection
-	output, err = exec.Command("nmcli", "connection", "up", connection_name).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cannot up nmcli connection: %w, output: %s", err, string(output))
+	// Assign UDC — needed before gc -e in enableGadget().
+	udcScript := fmt.Sprintf(
+		"udc=$(ls /sys/class/udc | head -n 1); [ -n \"$udc\" ] && echo \"$udc\" > '%s/UDC'",
+		basepath,
+	)
+	if out, err := exec.Command("sh", "-c", udcScript).CombinedOutput(); err != nil {
+		return fmt.Errorf("UDC assign failed: %w, output: %s", err, string(out))
 	}
 
 	return nil
 }
+
 
 func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}

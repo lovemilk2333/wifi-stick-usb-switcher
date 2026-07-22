@@ -77,9 +77,6 @@ type UsbGadgetFunction interface {
 	add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	remove(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
-	// postEnable is called after the gadget is enabled (gc -e). Use this
-	// for operations that require the network interface to exist (e.g. nmcli).
-	postEnable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 }
 
 type UsbGadgetFunctionBase struct {
@@ -111,10 +108,6 @@ func (this *UsbGadgetFunctionBase) getPath() string {
 
 func (this *UsbGadgetFunctionBase) getEffected() bool {
 	return this.effected
-}
-
-func (this *UsbGadgetFunctionBase) postEnable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	return nil
 }
 
 func (this *UsbGadgetFunctionBase) setEffected(effected bool) {
@@ -377,13 +370,37 @@ returns: (key, value) like (`bDeviceClass`, `0x00`)
 func (this *UsbGadgetController) parseGcGlobalField(line string) (string, string) {
 	line = strings.Replace(line, ":", "", 1)
 
-	idx := strings.LastIndexFunc(line, unicode.IsSpace)
+	// Find the rightmost run of 2+ consecutive whitespace chars.
+	// gc -l separates key and value with multiple spaces/tabs,
+	// while single spaces can appear within keys ("Serial Number")
+	// or values ("HandsomeMod Device"). Using LastIndexFunc alone
+	// breaks for multi-word values.
+	best := -1
+	runes := []rune(line)
+	for i := 1; i < len(runes); i++ {
+		if unicode.IsSpace(runes[i]) && unicode.IsSpace(runes[i-1]) {
+			best = i - 1
+		}
+	}
+
+	idx := best
 	if idx == -1 {
-		return "", ""
+		// Fall back to last single space when no 2+ space run exists.
+		idx = strings.LastIndexFunc(line, unicode.IsSpace)
+		if idx == -1 {
+			return "", ""
+		}
+	}
+
+	// Skip the whitespace run to find the value start.
+	runes = []rune(line)
+	valueStart := idx
+	for valueStart < len(runes) && unicode.IsSpace(runes[valueStart]) {
+		valueStart++
 	}
 
 	key := strings.TrimSpace(line[:idx])
-	value := strings.TrimSpace(line[idx:])
+	value := strings.TrimSpace(line[valueStart:])
 
 	return key, value
 }
@@ -789,13 +806,6 @@ func (this *UsbGadgetController) enableGadget() error {
 }
 
 func (this *UsbGadgetController) Apply() map[string]error {
-	// Save original functions before applyFunctions overwrites target_functions
-	// with snapshot data. We need the originals for postEnable.
-	pending := make([]UsbGadgetFunction, 0, len(this.target_functions))
-	for _, f := range this.target_functions {
-		pending = append(pending, f)
-	}
-
 	errors := this.applyFunctions()
 	if errors != nil {
 		return errors
@@ -810,13 +820,6 @@ func (this *UsbGadgetController) Apply() map[string]error {
 	if err != nil {
 		return map[string]error{
 			"enable_gadget": err,
-		}
-	}
-
-	// Post-enable setup: network config for RNDIS (needs interface to exist)
-	for _, f := range pending {
-		if err := f.postEnable(this.gadget, this.gc); err != nil {
-			log.Printf("WARN: post-enable setup for `%s` failed: %s\n", f.getPath(), err)
 		}
 	}
 

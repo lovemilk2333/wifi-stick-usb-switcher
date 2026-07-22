@@ -5,6 +5,7 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 	"github.com/pbnjay/memory"
@@ -220,4 +221,17 @@ func NewUsbGadget(config_fs string) (*UsbGadget, error) {
 	}
 
 	return gadget, nil
+}
+
+// functionSubpath returns the configfs subpath for a function attribute.
+// gc reuses the generated ID as the function directory name, which may or
+// may not include the type prefix.  When the instance already starts with
+// the type prefix (e.g. "rndis.1") it is used as-is; otherwise the type
+// is prepended (e.g. ffs type + "adb" → "ffs.adb").
+func functionSubpath(typ, instance, attr string) string {
+	dir := instance
+	if !strings.HasPrefix(dir, typ+".") {
+		dir = typ + "." + instance
+	}
+	return "functions/" + dir + "/" + attr
 }
