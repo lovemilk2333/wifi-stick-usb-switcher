@@ -29,6 +29,11 @@ type UsbGadgetRndis struct {
 	qmult        string
 	dnsmasq_args []string // 用户通过 --dnsmasq-arg 传入的自定义 dnsmasq 参数
 
+	// USB 描述符字符串,由 --rndis-serial-number 等参数传入
+	serial_number string
+	manufacturer  string
+	product       string
+
 	UsbGadgetFunctionBase
 }
 
@@ -142,13 +147,13 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 	}
 
 	// Override strings (gc defaults are generic HandsomeMod strings).
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, "wifi-stick-miruku"); err != nil {
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, this.serial_number); err != nil {
 		return fmt.Errorf("write serialnumber: %w", err)
 	}
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, "wifi-stick"); err != nil {
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, this.manufacturer); err != nil {
 		return fmt.Errorf("write manufacturer: %w", err)
 	}
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, "RNDIS Ethernet"); err != nil {
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, this.product); err != nil {
 		return fmt.Errorf("write product: %w", err)
 	}
 
@@ -370,7 +375,7 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
@@ -380,6 +385,9 @@ func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr 
 	rndis.ifname = ifname
 	rndis.qmult = qmult
 	rndis.dnsmasq_args = dnsmasq_args
+	rndis.serial_number = serial_number
+	rndis.manufacturer = manufacturer
+	rndis.product = product
 
 	rndis._type = "rndis"
 	rndis.code = USB_GADGET_FUNCTION_CODE_RNDIS

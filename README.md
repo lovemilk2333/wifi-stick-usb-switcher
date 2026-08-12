@@ -74,6 +74,9 @@ cli daemon [flags]
 | `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                  |
 | `-a, --rndis-ip`           | `10.22.33.1/24`                    | RNDIS 接口 IP(带前缀),DHCP 池由此自动推导         |
 | `-i, --rndis-ifname`       | `usb0`                             | RNDIS 接口名,`ip link` 可查                       |
+| `--rndis-serial-number`    | `wifi-stick-miruku`                | RNDIS 模式的 USB 序列号字符串                     |
+| `--rndis-manufacturer`     | `wifi-stick`                       | RNDIS 模式的制造商字符串                          |
+| `--rndis-product`          | `RNDIS Ethernet`                   | RNDIS 模式的产品字符串                            |
 | `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                   |
 
 ## dnsmasq 自定义
