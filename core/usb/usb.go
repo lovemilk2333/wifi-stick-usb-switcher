@@ -5,7 +5,6 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 	"github.com/pbnjay/memory"
@@ -201,6 +200,11 @@ func (this *UsbGadget) setAttr(subpath UsbGadgetSubpath, value string) error {
 		return err
 	}
 
+	// attr, err := this.getAttr(subpath)
+	// if attr != value {
+	// 	return fmt.Errorf("attr check failed: %s != %s", attr, value)
+	// }
+
 	this.state[string(subpath)] = value
 	return nil
 }
@@ -224,14 +228,12 @@ func NewUsbGadget(config_fs string) (*UsbGadget, error) {
 }
 
 // functionSubpath returns the configfs subpath for a function attribute.
-// gc reuses the generated ID as the function directory name, which may or
-// may not include the type prefix.  When the instance already starts with
-// the type prefix (e.g. "rndis.1") it is used as-is; otherwise the type
-// is prepended (e.g. ffs type + "adb" → "ffs.adb").
-func functionSubpath(typ, instance, attr string) string {
-	dir := instance
-	if !strings.HasPrefix(dir, typ+".") {
-		dir = typ + "." + instance
-	}
-	return "functions/" + dir + "/" + attr
+// The HandsomeMod gc fork always names the function directory
+// `functions/<type>.<instance>` — e.g. gc -a rndis creates
+// `functions/rndis.rndis.1` (instance reported by gc -l is "rndis.1"),
+// and gc -a ffs creates `functions/ffs.adb`.  The type prefix is always
+// repeated, so build the dir unconditionally instead of trusting whether
+// the instance already carries the prefix.
+func functionSubpath(_type, instance, attr string) string {
+	return "functions/" + _type + "." + instance + "/" + attr
 }

@@ -26,8 +26,6 @@ type UsbGadgetAdb struct {
 // specific setup (mount, adbd).
 
 func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	basepath := ctx.GetBasepath()
-
 	instance := this.getInstance()
 	if instance == "" {
 		return fmt.Errorf("adb instance not set after gc -a")
@@ -54,6 +52,7 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 		return fmt.Errorf("write bDeviceProtocol: %w", err)
 	}
 
+	// TODO move following lines to Base
 	// Override strings.
 	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, "wifi-stick-miruku"); err != nil {
 		return fmt.Errorf("write serialnumber: %w", err)
@@ -90,17 +89,10 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 	}
 
 	// Wait for adbd to write its ep0 descriptors; UDC won't bind without
-	// them.
-	time.Sleep(1 * time.Second)
-
-	// Write UDC.
-	udcScript := fmt.Sprintf(
-		"udc=$(ls /sys/class/udc | head -n 1); [ -n \"$udc\" ] && echo \"$udc\" > '%s/UDC'",
-		basepath,
-	)
-	if out, err := exec.Command("sh", "-c", udcScript).CombinedOutput(); err != nil {
-		return fmt.Errorf("UDC assign failed: %w, output: %s", err, string(out))
-	}
+	// them.  Like /sbin/mobian-usb-gadget, the UDC itself is bound later by
+	// gc -e in enableGadget() — binding here too would make gc -e fail with
+	// EBUSY and re-enumerate the host port twice.
+	time.Sleep(100 * time.Millisecond)
 
 	return nil
 }

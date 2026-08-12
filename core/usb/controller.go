@@ -668,6 +668,16 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 			function_errors["clear_all"] = err
 			return function_errors
 		}
+
+		// gc -c unbinds the UDC and tears the gadget down asynchronously on
+		// this platform (ChipIdea): a gc -a started immediately after can
+		// return before the gadget directory is fully re-created, making the
+		// following gc -l come back empty and effect() fail with
+		// "file `idVendor` not found".  Pressing the button in rapid
+		// succession runs applies back-to-back, hitting this every time.
+		// /sbin/mobian-usb-gadget inserts the same settle delay between
+		// teardown and setup.
+		time.Sleep(1 * time.Second)
 	} else {
 		log.Printf("DEBUG: gadget not yet created, skipping gc -c\n")
 	}
@@ -792,11 +802,19 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 }
 
 func (this *UsbGadgetController) enableGadget() error {
-	// UDC is already assigned either by:
-	//   - gc -a rndis (auto-assigns UDC)
-	//   - adb.effect()  (writes UDC after adbd init)
-	// Just run gc -e to enable the gadget.
+	// Give the USB controller/host time to settle after gc -c tore down the
+	// previous gadget (unbind = host sees a disconnect).  Rebinding within
+	// milliseconds can leave the host port stuck and the device "not
+	// recognized" — the reference script /sbin/mobian-usb-gadget inserts the
+	// same sleep 1 between the function setup and gc -e.
+	time.Sleep(1 * time.Second)
 
+	// gc -e (usbg_enable_gadget) is the single place the UDC is bound: gc -a
+	// only creates the gadget (gc_generic.c gc_init() even disables it), and
+	// effect() only writes configfs attributes.  Binding here exactly once,
+	// after all attributes are applied, mirrors the reference script — the
+	// old approach (echo UDC inside effect()) made the subsequent gc -e fail
+	// with EBUSY and re-enumerate the host port twice.
 	_, err := this.gc("-e")
 	if err != nil {
 		return err
@@ -879,9 +897,13 @@ func (this *UsbGadgetController) AddFunction(function UsbGadgetFunction) error {
 	// NOTE: don't check rndis ifname here — the network interface doesn't exist
 	// until the gadget function is added and enabled via gc -e.
 
-	if function.getInstance() == "" {
-		function.setInstance("tmp::" + time.Now().UTC().Format(time.RFC3339))
-	}
+	// Modes share one function object across switch cycles.  gc -l sync in
+	// applyFunctions() writes back the real instance (e.g. "rndis.1"), so a
+	// stale instance/effected state would make the next apply skip gc -a and
+	// write effect attributes to a gadget that gc -c has already torn down.
+	// Always reset to a fresh placeholder — applyFunctions() re-syncs it.
+	function.setInstance("tmp::" + time.Now().UTC().Format(time.RFC3339))
+	function.setEffected(false)
 
 	this.target_functions[function.getPath()] = function
 

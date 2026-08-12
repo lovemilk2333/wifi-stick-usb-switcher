@@ -1,10 +1,16 @@
 package core
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
 	"net/netip"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
@@ -13,7 +19,19 @@ import (
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/usb"
 )
 
+// TODO
+// https://github.com/james-barrow/golang-ipc
+
 const PROJECT_IDENT = "miruku-wifi-stick-usb-switcher"
+
+// modes 数组索引 — 见 init() 中的构建顺序
+const (
+	mode_index_rndis = 0
+	mode_index_adb   = 1
+)
+
+// dnsmasq 实例的 pid 文件,ADB 模式切换时按它精确停掉,避免误杀系统 dnsmasq
+const dnsmasqPidFile = "/tmp/dnsmasq-usb0.pid"
 
 type DaemonCmd struct {
 	Devnode              string           `arg:"-d,required" help:"button devnode path"`
@@ -41,6 +59,10 @@ type Daemon struct {
 	current_mode int
 	mode_changed bool
 	tick_rate    time.Duration
+
+	// RNDIS 网络配置 — 由 init() 从 DaemonCmd 拷贝
+	rndis_ifname string
+	rndis_ip     netip.Prefix
 }
 
 func NewDaemon(cmd DaemonCmd, tick_rate time.Duration) (*Daemon, error) {
@@ -127,6 +149,9 @@ func (this *Daemon) init(cmd DaemonCmd) error {
 		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb"),
 	}
 
+	this.rndis_ifname = cmd.RndisUsbIfname
+	this.rndis_ip = rndisIP
+
 	// ---- initialise LEDs --------------------------------------------------
 
 	this.interpreters = loadLedInterpreters(cmd.Leds)
@@ -177,12 +202,23 @@ func (this *Daemon) Tick() {
 			log.Printf("WARN: cannot add function: %v\n", err)
 		}
 
+		apply_ok := true
 		if errs := this.controller.Apply(); errs != nil {
+			apply_ok = false
 			log.Printf("WARN: cannot apply functions: %v\n", errs)
 		}
 
 		if errs := this.controller.UpdateGadget(); errs != nil {
+			apply_ok = false
 			log.Printf("WARN: cannot update gadget: %v\n", errs)
+		}
+
+		if apply_ok {
+			if this.current_mode == mode_index_rndis {
+				this.setupRndisNetwork()
+			} else {
+				this.teardownRndisNetwork()
+			}
 		}
 
 		for _, interpreter := range this.interpreters {
@@ -218,6 +254,131 @@ func loadLedInterpreters(ledDevnodes []string) []*led.LedInterpreter {
 	}
 
 	return interpreters
+}
+
+// setupRndisNetwork 配置 usb0 并启动 dnsmasq,用户验证过的流程:
+//
+//	ip link set usb0 up
+//	ip addr add 10.22.33.1/24 dev usb0      (已分配时忽略错误)
+//	dnsmasq --interface=usb0 --bind-interfaces --dhcp-range=... ...
+//
+// usb0 由内核在 gc -e 绑定 gadget 后才创建,所以先轮询它出现。
+func (this *Daemon) setupRndisNetwork() {
+	ifname := this.rndis_ifname
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := net.InterfaceByName(ifname); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			log.Printf("WARN: rndis interface `%s` not found after apply, skip network setup\n", ifname)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// usb0 由 daemon 静态配置 + dnsmasq 服务。NM 的 "有线连接 1" (method=auto)
+	// 会把 usb0 当 DHCP client,永远拿不到地址(设备上没有 DHCP server 服务
+	// 自身),超时后停用连接并删掉 IPv4 地址,破坏 RNDIS。让它别管理 usb0。
+	// 仅运行时生效,重启后 NM 恢复 — 每次 setup 都会重新执行。
+	_ = exec.Command("nmcli", "device", "set", ifname, "managed", "no").Run()
+
+	if out, err := exec.Command("ip", "link", "set", ifname, "up").CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip link set %s up`: %v, output: %s\n", ifname, err, string(out))
+	}
+
+	ipSpec := this.rndis_ip.String()
+	if out, err := exec.Command("ip", "addr", "add", ipSpec, "dev", ifname).CombinedOutput(); err != nil {
+		// 重复 apply 时地址已存在 — 不是错误
+		log.Printf("DEBUG: `ip addr add %s dev %s`: %v, output: %s\n", ipSpec, ifname, err, string(out))
+	}
+
+	this.startDnsmasq()
+}
+
+// startDnsmasq 在 usb0 上启动 dnsmasq DHCP 服务器,供 USB host 获取地址。
+// 池从本机 IP 之后到子网最后一个地址;--port=0 关闭 DNS,避免与系统
+// dnsmasq 冲突(系统实例已禁用,usb0 实例独占 67 端口)。
+func (this *Daemon) startDnsmasq() {
+	if pid, err := os.ReadFile(dnsmasqPidFile); err == nil {
+		if pidNum, err := strconv.Atoi(strings.TrimSpace(string(pid))); err == nil && pidNum > 0 && processAlive(pidNum) {
+			log.Printf("DEBUG: dnsmasq for usb0 already running (pid %d)\n", pidNum)
+			return
+		}
+	}
+
+	router := this.rndis_ip.Masked().Addr()
+	last, ok := subnetLast(this.rndis_ip)
+	if !ok {
+		log.Printf("WARN: cannot derive dhcp pool from `%s`, skip dnsmasq\n", this.rndis_ip)
+		return
+	}
+	start := router.Next()
+	end := last.Prev()
+	if !start.IsValid() || start.Compare(end) > 0 {
+		log.Printf("WARN: invalid dhcp pool %s-%s for `%s`, skip dnsmasq\n", start, end, this.rndis_ip)
+		return
+	}
+
+	args := []string{
+		"--interface=" + this.rndis_ifname,
+		"--bind-interfaces",
+		fmt.Sprintf("--dhcp-range=%s,%s,12h", start, end),
+		"--dhcp-option=option:router," + router.String(),
+		"--port=0", // 不提供 DNS
+		"--no-resolv",
+		"--no-hosts",
+		"--pid-file=" + dnsmasqPidFile,
+	}
+	if out, err := exec.Command("dnsmasq", args...).CombinedOutput(); err != nil {
+		log.Printf("WARN: cannot start dnsmasq: %v, output: %s\n", err, string(out))
+		return
+	}
+	log.Printf("DEBUG: dnsmasq started on %s (pool %s-%s, router %s)\n", this.rndis_ifname, start, end, router)
+}
+
+// teardownRndisNetwork 切到 ADB 模式时停掉 dnsmasq。usb0 接口随 gadget
+// 一起消失,IP 地址自动清除,无需处理。
+func (this *Daemon) teardownRndisNetwork() {
+	pidData, err := os.ReadFile(dnsmasqPidFile)
+	if err != nil {
+		return // 没有运行
+	}
+
+	pidNum, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil || pidNum <= 0 || !processAlive(pidNum) {
+		return
+	}
+
+	if err := syscall.Kill(pidNum, syscall.SIGTERM); err != nil {
+		log.Printf("WARN: cannot stop dnsmasq (pid %d): %v\n", pidNum, err)
+		return
+	}
+	_ = os.Remove(dnsmasqPidFile)
+	log.Printf("DEBUG: stopped dnsmasq (pid %d)\n", pidNum)
+}
+
+// processAlive 检查 pid 对应的进程是否存在。
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+// subnetLast 返回 prefix 子网的最后一个地址(广播地址)。
+func subnetLast(prefix netip.Prefix) (netip.Addr, bool) {
+	if !prefix.IsValid() || prefix.Bits() >= 32 || !prefix.Addr().Is4() {
+		return netip.Addr{}, false
+	}
+
+	a := prefix.Masked().Addr().As4()
+	network := binary.BigEndian.Uint32(a[:])
+	mask := uint32(0xffffffff) << (32 - prefix.Bits())
+	broadcast := network | ^mask
+
+	var last [4]byte
+	binary.BigEndian.PutUint32(last[:], broadcast)
+	return netip.AddrFrom4(last), true
 }
 
 func (this *Daemon) isValidConfigFs(path string) bool {
