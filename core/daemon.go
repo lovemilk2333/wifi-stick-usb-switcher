@@ -31,6 +31,7 @@ type DaemonCmd struct {
 	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
+	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
 	// TickRate             time.Duration    `arg:"--tick-rate" default:"10ms" help:"daemon event loop tick rate"`
 }
 
@@ -127,7 +128,7 @@ func (this *Daemon) init(cmd DaemonCmd) error {
 	// ---- prepare modes ----------------------------------------------------
 
 	this.modes = []usb.UsbGadgetFunction{
-		usb.NewUsbGadgetRndis(rndisIP, PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, ""),
+		usb.NewUsbGadgetRndis(rndisIP, PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs),
 		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb"),
 	}
 

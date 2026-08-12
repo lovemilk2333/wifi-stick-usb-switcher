@@ -23,10 +23,11 @@ type UsbGadgetRndis struct {
 	ip_addr           netip.Prefix
 	connection_prefix string
 
-	dev_addr  string
-	host_addr string
-	ifname    string
-	qmult     string
+	dev_addr     string
+	host_addr    string
+	ifname       string
+	qmult        string
+	dnsmasq_args []string // 用户通过 --dnsmasq-arg 传入的自定义 dnsmasq 参数
 
 	UsbGadgetFunctionBase
 }
@@ -273,16 +274,27 @@ func (this *UsbGadgetRndis) startDnsmasq() {
 		return
 	}
 
+	// 参数顺序:服务默认值 → 用户自定义(--dnsmasq-arg)→ 控制参数。
+	// dnsmasq 对标量选项(如 --port)取最后一次出现,所以用户参数放在
+	// 默认值之后可以覆盖它们(--port=53 开启 DNS);--interface /
+	// --bind-interfaces / --pid-file 是控制参数,必须最后,保证接口归属
+	// 和 stopDnsmasqAll 的 pid 文件追踪不被破坏。
+	// 注意 --no-resolv / --no-hosts 无法被参数覆盖(--hosts 没有正向
+	// 开关);想提供 hosts 请用 --addn-hosts=...(--no-hosts 只跳过
+	// /etc/hosts,addn-hosts 文件仍然加载)。
 	args := []string{
-		"--interface=" + this.ifname,
-		"--bind-interfaces",
 		fmt.Sprintf("--dhcp-range=%s,%s,12h", start, end),
 		"--dhcp-option=option:router," + router.String(),
 		"--port=0", // 不提供 DNS
 		"--no-resolv",
 		"--no-hosts",
-		"--pid-file=" + pidFile,
 	}
+	args = append(args, this.dnsmasq_args...)
+	args = append(args,
+		"--interface="+this.ifname,
+		"--bind-interfaces",
+		"--pid-file="+pidFile,
+	)
 	if out, err := exec.Command("dnsmasq", args...).CombinedOutput(); err != nil {
 		log.Printf("WARN: cannot start dnsmasq: %v, output: %s\n", err, string(out))
 	}
@@ -358,7 +370,7 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
@@ -367,6 +379,7 @@ func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr 
 	rndis.host_addr = host_addr
 	rndis.ifname = ifname
 	rndis.qmult = qmult
+	rndis.dnsmasq_args = dnsmasq_args
 
 	rndis._type = "rndis"
 	rndis.code = USB_GADGET_FUNCTION_CODE_RNDIS
