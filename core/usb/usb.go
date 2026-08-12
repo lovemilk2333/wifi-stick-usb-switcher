@@ -168,15 +168,11 @@ func (this *UsbGadget) setLanguageStrings(subpath UsbGadgetSubpathStrings, value
 	script := fmt.Sprintf("mkdir -p '%s' && echo '%s' > '%s'",
 		fullDirPath, value, fullFilePath)
 
-	log.Printf("DEBUG setLanguageStrings: lang=%q subpath=%q dir=%q file=%q script=%q\n",
-		this.state["language"], subpath, fullDirPath, fullFilePath, script)
-
 	out, err := exec.Command("sh", "-c", script).CombinedOutput()
 	if err != nil {
 		log.Printf("ERROR setLanguageStrings FAILED: %s, output: %s\n", err, string(out))
 		return fmt.Errorf("cannot write language string: %w, output: %s", err, string(out))
 	}
-	log.Printf("DEBUG setLanguageStrings OK: wrote %q to %s\n", value, fullFilePath)
 
 	this.state[string(full_subpath)] = value
 	return nil
@@ -227,13 +223,3 @@ func NewUsbGadget(config_fs string) (*UsbGadget, error) {
 	return gadget, nil
 }
 
-// functionSubpath returns the configfs subpath for a function attribute.
-// The HandsomeMod gc fork always names the function directory
-// `functions/<type>.<instance>` — e.g. gc -a rndis creates
-// `functions/rndis.rndis.1` (instance reported by gc -l is "rndis.1"),
-// and gc -a ffs creates `functions/ffs.adb`.  The type prefix is always
-// repeated, so build the dir unconditionally instead of trusting whether
-// the instance already carries the prefix.
-func functionSubpath(_type, instance, attr string) string {
-	return "functions/" + _type + "." + instance + "/" + attr
-}

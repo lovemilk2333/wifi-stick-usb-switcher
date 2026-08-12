@@ -4,12 +4,11 @@ import (
 	"debug/elf"
 	"fmt"
 	"log"
-	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode"
 )
 
 /*
@@ -77,6 +76,7 @@ type UsbGadgetFunction interface {
 	add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	remove(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
+	enable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 }
 
 type UsbGadgetFunctionBase struct {
@@ -130,6 +130,12 @@ func (this *UsbGadgetFunctionBase) add(ctx UsbGadgetContext, gc func(args ...str
 		return err
 	}
 
+	return nil
+}
+
+// enable 在 gadget 绑定(enableGadget 的 gc -e)之后调用 — 此时内核接口
+// (如 usb0)才存在。默认无操作;需要运行时管理的实现覆写它。
+func (this *UsbGadgetFunctionBase) enable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
 	return nil
 }
 
@@ -217,61 +223,6 @@ func (this *UsbGadgetController) checkGc() error {
 }
 
 const RNDIS_USE_GADGET_FUNCTION = "rndis"
-
-// func (this *UsbGadgetController) rndisCheckIfname(function UsbGadgetFunction) error {
-// 	function_type := function.getType()
-// 	if function_type != RNDIS_USE_GADGET_FUNCTION {
-// 		return fmt.Errorf("invalid UsbGadgetFunction: expect `rndis`, got `%s`", function_type)
-// 	}
-
-// 	function_path := function.getPath()
-// 	if strings.ContainsRune(function_path, filepath.Separator) {
-// 		return fmt.Errorf("invalid UsbGadgetFunction path  `%s`: %c is not valid filename character", function_path, filepath.Separator)
-// 	}
-
-// 	subpath := filepath.Join("functions/", function_path, "ifname")
-
-// 	ifname_binary, err := this.gadget.ReadSubpath(base.Subpath(subpath), true)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	ifname := strings.TrimSpace(string(ifname_binary))
-// 	if ifname == "" {
-// 		return fmt.Errorf("cannot get UsbGadgetFunction rndis ifname: file is empty: `%s`", subpath)
-// 	}
-
-// 	_, err = net.InterfaceByName(ifname)
-// 	if err != nil {
-// 		return fmt.Errorf("cannot access UsbGadgetFunction rndis ifname %s: %w", ifname, err)
-// 	}
-
-// 	return nil
-// }
-
-func (this *UsbGadgetController) rndisCheckIfname(function UsbGadgetFunction) error {
-	function_type := function.getType()
-	if function_type != RNDIS_USE_GADGET_FUNCTION {
-		return fmt.Errorf("invalid UsbGadgetFunction: expect `rndis`, got `%s`", function_type)
-	}
-
-	rndis, ok := function.(*UsbGadgetRndis)
-	if !ok {
-		return fmt.Errorf("cannot convert UsbGadgetFunction to UsbGadgetRndis")
-	}
-
-	ifname := rndis.ifname
-	if ifname == "" {
-		return fmt.Errorf("got an empty UsbGadgetFunction rndis ifname")
-	}
-
-	_, err := net.InterfaceByName(ifname)
-	if err != nil {
-		return fmt.Errorf("cannot access UsbGadgetFunction rndis ifname %s: %w", ifname, err)
-	}
-
-	return nil
-}
 
 func (this *UsbGadgetController) resetFunctions(targets bool) {
 	this.current_functions = make(map[string]UsbGadgetFunction)
@@ -368,41 +319,28 @@ func (this *UsbGadgetController) parseGcId(line string) string {
 returns: (key, value) like (`bDeviceClass`, `0x00`)
 */
 func (this *UsbGadgetController) parseGcGlobalField(line string) (string, string) {
-	line = strings.Replace(line, ":", "", 1)
-
-	// Find the rightmost run of 2+ consecutive whitespace chars.
-	// gc -l separates key and value with multiple spaces/tabs,
-	// while single spaces can appear within keys ("Serial Number")
-	// or values ("HandsomeMod Device"). Using LastIndexFunc alone
-	// breaks for multi-word values.
-	best := -1
-	runes := []rune(line)
-	for i := 1; i < len(runes); i++ {
-		if unicode.IsSpace(runes[i]) && unicode.IsSpace(runes[i-1]) {
-			best = i - 1
-		}
+	// gc -l separates key and value with tabs (one or more); keys never
+	// contain tabs but values may contain spaces ("HandsomeMod Device"),
+	// and the key "Serial Number" contains a space too — so only a tab is
+	// a reliable separator.  Splitting at the last whitespace instead
+	// (the old fallback) broke for two-word keys with an empty value:
+	// "Serial Number" became key="Serial" value="Number", which got
+	// written back to configfs as strings/0x409/serial (EACCES).
+	if idx := strings.LastIndexByte(line, '\t'); idx != -1 {
+		key := strings.TrimSpace(line[:idx])
+		value := strings.TrimSpace(line[idx+1:])
+		key = strings.TrimSuffix(key, ":") // "Language: " -> "Language"
+		return key, value
 	}
 
-	idx := best
-	if idx == -1 {
-		// Fall back to last single space when no 2+ space run exists.
-		idx = strings.LastIndexFunc(line, unicode.IsSpace)
-		if idx == -1 {
-			return "", ""
-		}
+	// No tab: only a "Key: value" line (e.g. "Language: 0x409") is valid.
+	if idx := strings.IndexByte(line, ':'); idx != -1 {
+		return strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+1:])
 	}
 
-	// Skip the whitespace run to find the value start.
-	runes = []rune(line)
-	valueStart := idx
-	for valueStart < len(runes) && unicode.IsSpace(runes[valueStart]) {
-		valueStart++
-	}
-
-	key := strings.TrimSpace(line[:idx])
-	value := strings.TrimSpace(line[valueStart:])
-
-	return key, value
+	// No separator at all — key with an empty value (e.g. "UDC" when the
+	// gadget is unbound, "Manufacturer" when the string is unset).
+	return "", ""
 }
 
 /*
@@ -447,7 +385,6 @@ func (this *UsbGadgetController) parseGcList(gadget_id string) (string, map[stri
 	output = strings.TrimSpace(output)
 
 	if output == "" {
-		log.Printf("DEBUG: usb gadget not created\n")
 		return "", nil, nil, nil, nil
 	}
 
@@ -588,16 +525,18 @@ finish:
 }
 
 func (this *UsbGadgetController) updateGadget() []error {
-	language, language_fields, state, functions, errors := this.parseGcList(this.gadget.id)
+	language, _, state, functions, errors := this.parseGcList(this.gadget.id)
 	if len(errors) > 0 {
 		return errors
 	}
 
 	if language != "" {
+		// NOTE: 只记录 language,不要写回 —— gc -l 是 configfs 的只读快照,
+		// setLanguageStrings 写回既多余(值本来就来自 configfs),又会在
+		// strings 为空时把解析容错得到的垃圾 key 写进不存在的路径
+		// (如 strings/0x409/serial → EACCES)。字符串由各函数的 effect()
+		// 显式写入。
 		this.gadget.setLanguage(language)
-		for key, value := range language_fields {
-			this.gadget.setLanguageStrings(UsbGadgetSubpathStrings(key), value)
-		}
 	}
 
 	if len(state) == 0 {
@@ -610,7 +549,11 @@ func (this *UsbGadgetController) updateGadget() []error {
 		this.resetFunctions(false)
 	} else {
 		this.current_functions = functions
-		this.target_functions = functions
+		// NOTE: 不要替换 target_functions —— 它是用户目标(daemon 的
+		// mode 函数对象,含 ip_addr/ifname 等配置);gc -l 解析出来的是
+		// configfs 快照(只有 type/instance),替换后 Apply() 的 enable()
+		// 会拿到零值对象(ifname 为空 → 轮询超时,IP/dnsmasq 全部不配)。
+		// current_functions 只用于状态展示和 instance 同步。
 	}
 
 	return nil
@@ -669,17 +612,22 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 			return function_errors
 		}
 
-		// gc -c unbinds the UDC and tears the gadget down asynchronously on
-		// this platform (ChipIdea): a gc -a started immediately after can
-		// return before the gadget directory is fully re-created, making the
-		// following gc -l come back empty and effect() fail with
-		// "file `idVendor` not found".  Pressing the button in rapid
-		// succession runs applies back-to-back, hitting this every time.
-		// /sbin/mobian-usb-gadget inserts the same settle delay between
-		// teardown and setup.
+		// gc -c tears the gadget down asynchronously on this platform
+		// (ChipIdea): a create started immediately after can return before
+		// the gadget directory is fully removed.  Pressing the button in
+		// rapid succession runs applies back-to-back, hitting this every
+		// time.  /sbin/mobian-usb-gadget inserts the same settle delay
+		// between teardown and setup.
 		time.Sleep(1 * time.Second)
-	} else {
-		log.Printf("DEBUG: gadget not yet created, skipping gc -c\n")
+	}
+
+	// 手工创建 gadget 骨架(gadget 目录 + strings + configs)。不用 gc -a:
+	// 这台设备上的 gc -a 创建函数后立即绑定 UDC,config link 建立即锁定
+	// 全部函数属性(dev_addr 写入 EBUSY),MAC 永远写不进去;绑定前的
+	// configfs 才是可写的,绑定由 enableGadget 的 echo UDC 完成。
+	if err := this.createGadget(); err != nil {
+		function_errors["create_gadget"] = err
+		return function_errors
 	}
 
 	functions := this.target_functions
@@ -736,21 +684,14 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 		}
 	}
 
+	// NOTE: 不做 rndis ifname 检查 —— usb0 接口要到 enableGadget 绑定后
+	// 才存在,add 阶段检查只会误报。
 	index := -1
-	for path, function := range functions {
+	for _, function := range functions {
 		index++
 		if function.getEffected() {
 			function_add_status[index] = true
 			continue
-		}
-
-		if function_add_status[index] && function.getType() == RNDIS_USE_GADGET_FUNCTION {
-			err := this.rndisCheckIfname(function)
-			if err != nil {
-				function_errors[path] = err
-				function_add_status[index] = false
-				continue
-			}
 		}
 
 		safeAdd(index, function)
@@ -801,26 +742,61 @@ func (this *UsbGadgetController) applyFunctions() map[string]error {
 	}
 }
 
+// createGadget 手工创建 gadget 骨架(configfs 原生 mkdir,不用 gc -a):
+// gadget 目录 + strings/<lang> + configs/<config> + config strings,
+// 属性值由各函数的 effect() 写入,UDC 绑定由 enableGadget 完成。
+// 这台设备上的 gc -a 创建函数后立即绑定 UDC,config link 建立即锁定
+// 全部函数属性(dev_addr/host_addr 写入 EBUSY),只有绑定前的 configfs
+// 可写 —— 所以创建顺序必须是:mkdir 骨架 → add(写函数属性 + link)→
+// effect(写 gadget 属性)→ enableGadget(绑定)。
+func (this *UsbGadgetController) createGadget() error {
+	basepath := this.gadget.Basepath
+
+	if err := os.MkdirAll(filepath.Join(basepath, "strings", "0x409"), 0755); err != nil {
+		return fmt.Errorf("mkdir gadget strings: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(basepath, "configs", "c1.1", "strings", "0x409"), 0755); err != nil {
+		return fmt.Errorf("mkdir gadget config strings: %w", err)
+	}
+
+	this.gadget.init = true
+	return nil
+}
+
+// enableGadget 绑定 UDC —— 手工 configfs 创建的 gadget 未绑定,直接
+// `echo <udc> > UDC` 完成绑定(不用 gc -e:这台设备上的 gc -a 已经
+// 绑过,gc -e 会因重复绑定报 EBUSY;手工流程里 UDC 绑定只有这里
+// 一次)。绑定后内核才创建 usb0 接口,host 侧重枚举一次。
 func (this *UsbGadgetController) enableGadget() error {
 	// Give the USB controller/host time to settle after gc -c tore down the
 	// previous gadget (unbind = host sees a disconnect).  Rebinding within
 	// milliseconds can leave the host port stuck and the device "not
 	// recognized" — the reference script /sbin/mobian-usb-gadget inserts the
-	// same sleep 1 between the function setup and gc -e.
+	// same sleep 1 between teardown and rebind.
 	time.Sleep(1 * time.Second)
 
-	// gc -e (usbg_enable_gadget) is the single place the UDC is bound: gc -a
-	// only creates the gadget (gc_generic.c gc_init() even disables it), and
-	// effect() only writes configfs attributes.  Binding here exactly once,
-	// after all attributes are applied, mirrors the reference script — the
-	// old approach (echo UDC inside effect()) made the subsequent gc -e fail
-	// with EBUSY and re-enumerate the host port twice.
-	_, err := this.gc("-e")
+	udc, err := findUdc()
 	if err != nil {
 		return err
 	}
-
+	udcPath := filepath.Join(this.gadget.Basepath, "UDC")
+	out, err := exec.Command("sh", "-c", "echo '"+udc+"' > '"+udcPath+"'").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("bind udc %s: %w, output: %s", udc, err, string(out))
+	}
 	return nil
+}
+
+// findUdc 返回系统唯一的 UDC 控制器名(如 ci_hdrc.0)。
+func findUdc() (string, error) {
+	entries, err := os.ReadDir("/sys/class/udc")
+	if err != nil {
+		return "", fmt.Errorf("list /sys/class/udc: %w", err)
+	}
+	for _, entry := range entries {
+		return entry.Name(), nil
+	}
+	return "", fmt.Errorf("no udc found in /sys/class/udc")
 }
 
 func (this *UsbGadgetController) Apply() map[string]error {
@@ -841,7 +817,18 @@ func (this *UsbGadgetController) Apply() map[string]error {
 		}
 	}
 
-	return nil
+	// UDC 已绑定,内核接口(usb0)此时存在 — 让每个函数实现做自己的
+	// 运行时管理(如 RNDIS 的 IP + dnsmasq)。
+	var enable_errors map[string]error
+	for path, function := range this.target_functions {
+		if err := function.enable(this.gadget, this.gc); err != nil {
+			if enable_errors == nil {
+				enable_errors = make(map[string]error)
+			}
+			enable_errors["call_enable_"+path] = err
+		}
+	}
+	return enable_errors
 }
 
 func (this *UsbGadgetController) GetFunctions() map[string]UsbGadgetFunction {
@@ -897,12 +884,10 @@ func (this *UsbGadgetController) AddFunction(function UsbGadgetFunction) error {
 	// NOTE: don't check rndis ifname here — the network interface doesn't exist
 	// until the gadget function is added and enabled via gc -e.
 
-	// Modes share one function object across switch cycles.  gc -l sync in
-	// applyFunctions() writes back the real instance (e.g. "rndis.1"), so a
-	// stale instance/effected state would make the next apply skip gc -a and
-	// write effect attributes to a gadget that gc -c has already torn down.
-	// Always reset to a fresh placeholder — applyFunctions() re-syncs it.
-	function.setInstance("tmp::" + time.Now().UTC().Format(time.RFC3339))
+	// Modes share one function object across switch cycles.  The instance is
+	// (re)assigned by each concrete add() implementation (fixed name, e.g.
+	// "rndis.1") on every apply, and effects are re-run — only flag the
+	// function for a fresh add here.
 	function.setEffected(false)
 
 	this.target_functions[function.getPath()] = function
