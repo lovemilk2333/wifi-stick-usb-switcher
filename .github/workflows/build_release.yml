@@ -1,0 +1,70 @@
+name: Build and Release
+
+on:
+    workflow_dispatch:
+        inputs:
+            release_tag:
+                description: "Release Tag"
+                required: false
+                default: ""
+
+permissions:
+    contents: write
+
+jobs:
+    build:
+        name: Build and Release Binaries
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version-file: "go.mod"
+                  cache: true
+
+            - name: Install ARM64 Cross Compiler
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y gcc-aarch64-linux-gnu
+
+            - name: Run Build Script
+              run: |
+                  chmod +x ./build.sh
+
+                  echo "Building amd64..."
+                  ./build.sh amd64
+
+                  echo "Building arm64..."
+                  ./build.sh arm64
+
+            - name: Prepare Assets and Tag
+              id: prep
+              run: |
+                  mkdir -p release_dist
+                  cp build/amd64/cli release_dist/cli-linux-amd64
+                  cp build/arm64/cli release_dist/cli-linux-arm64
+
+                  INPUT_TAG="${{ github.event.inputs.release_tag }}"
+                  if [ -n "$INPUT_TAG" ]; then
+                    TAG_NAME="$INPUT_TAG"
+                  else
+                    SHORT_SHA=$(git rev-parse --short HEAD)
+                    TAG_NAME="rolling-${SHORT_SHA}"
+                  fi
+
+                  echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ steps.prep.outputs.tag_name }}
+                  files: release_dist/*
+                  generate_release_notes: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
