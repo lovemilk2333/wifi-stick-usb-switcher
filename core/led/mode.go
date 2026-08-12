@@ -30,7 +30,7 @@ func (this *LedMode) Off() *LedMode {
 }
 
 func (this *LedMode) OffDuration(duration time.Duration) *LedMode {
-	return this.Off().Wait(duration)
+	return this.Off().Wait(duration).On()
 }
 
 func (this *LedMode) On() *LedMode {
@@ -41,7 +41,7 @@ func (this *LedMode) On() *LedMode {
 }
 
 func (this *LedMode) OnDuration(duration time.Duration) *LedMode {
-	return this.On().Wait(duration)
+	return this.On().Wait(duration).Off()
 }
 
 func (this *LedMode) Wait(duration time.Duration) *LedMode {

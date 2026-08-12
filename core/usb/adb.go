@@ -10,16 +10,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
-)
 
-// type Usb
-// TODO
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
+)
 
 var adbd_process *exec.Cmd = nil
 
 // 本 daemon 启动的 adbd 的 pid 文件 — killAdbd 在进程句柄丢失(daemon
 // 重启)时用它精确停掉自己启动的 adbd
-const adbdPidFile = "/tmp/wifi-stick-usb-switcher-adbd.pid"
+const adbdPidFile = "/tmp/" + base.PROJECT_IDENT + "-adbd.pid"
 
 type UsbGadgetAdb struct {
 	dev_name string
