@@ -247,6 +247,12 @@ func hasIfaceAddr(ifname, ipSpec string) bool {
 func (this *UsbGadgetRndis) unmanageFromNetworkManager(ifname string) {
 	confPath := filepath.Join("/run/NetworkManager/conf.d", "wifi-stick-usb.conf")
 	content := "[device]\nmatch-device=interface-name:" + ifname + "\nmanaged=0\n"
+	// os.WriteFile 不建目录;/run/NetworkManager/conf.d 在无 NM 的系统上
+	// 不存在,先 MkdirAll 再写(没有 NM 时整步本就是无害 no-op)
+	if err := os.MkdirAll(filepath.Dir(confPath), 0755); err != nil {
+		log.Printf("WARN: mkdir %s: %v\n", filepath.Dir(confPath), err)
+		return
+	}
 	if err := os.WriteFile(confPath, []byte(content), 0644); err != nil {
 		log.Printf("WARN: write %s: %v\n", confPath, err)
 		return
@@ -266,7 +272,9 @@ func (this *UsbGadgetRndis) startDnsmasq() {
 		return // 已在运行,pid 文件校验过 cmdline,不会误判
 	}
 
-	router := this.ip_addr.Masked().Addr()
+	// 网关就是本机 usb0 的地址 —— 用 Masked() 会取到网络地址
+	// (10.22.33.0),给 host 一个无人应答的假网关
+	router := this.ip_addr.Addr()
 	last, ok := subnetLast(this.ip_addr)
 	if !ok {
 		log.Printf("WARN: cannot derive dhcp pool from `%s`, skip dnsmasq\n", this.ip_addr)
@@ -288,6 +296,10 @@ func (this *UsbGadgetRndis) startDnsmasq() {
 	// 开关);想提供 hosts 请用 --addn-hosts=...(--no-hosts 只跳过
 	// /etc/hosts,addn-hosts 文件仍然加载)。
 	args := []string{
+		// 不读系统配置文件:dnsmasq 默认会加载 /etc/dnsmasq.conf 及其 include
+		// (OpenWrt: /tmp/dnsmasq.d/),把系统 DHCP 范围(实测:192.168.68.10
+		// -.254,stick 出厂 RNDIS 网段)合并进本实例,为无关网段广播 DHCP
+		"--conf-file=/dev/null",
 		fmt.Sprintf("--dhcp-range=%s,%s,12h", start, end),
 		"--dhcp-option=option:router," + router.String(),
 		"--port=0", // 不提供 DNS

@@ -81,7 +81,7 @@ cli daemon [flags]
 
 ## dnsmasq 自定义
 
-默认参数在 RNDIS 接口上启动 dnsmasq:DHCP 池从本机 IP 之后到子网广播地址之前,提供网关(DHCP option 3),`--port=0` 关闭 DNS(避免与系统 dnsmasq 冲突)。
+默认参数在 RNDIS 接口上启动 dnsmasq:DHCP 池从本机 IP 之后到子网广播地址之前,提供网关(DHCP option 3),`--port=0` 关闭 DNS(避免与系统 dnsmasq 冲突)。启动时带 `--conf-file=/dev/null`,**不加载系统 dnsmasq 配置**(否则 OpenWrt/出厂配置里的 DHCP 范围,如 192.168.68.x,会被合并进本实例)。
 
 自定义参数通过 `--dnsmasq-arg` 传入,**注意必须使用 `=` 形式**(空格分隔的值以 `--` 开头会被 go-arg 当作新参数解析):
 
