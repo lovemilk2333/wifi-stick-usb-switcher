@@ -47,8 +47,9 @@ jobs:
               id: prep
               run: |
                   mkdir -p release_dist
-                  cp build/amd64/cli release_dist/cli-linux-amd64
-                  cp build/arm64/cli release_dist/cli-linux-arm64
+
+                  tar -I zstd -cvf release_dist/cli-linux-amd64.tar.zst -C build/amd64 cli
+                  tar -I zstd -cvf release_dist/cli-linux-arm64.tar.zst -C build/arm64 cli
 
                   INPUT_TAG="${{ github.event.inputs.release_tag }}"
                   if [ -n "$INPUT_TAG" ]; then

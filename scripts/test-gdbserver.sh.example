@@ -2,4 +2,4 @@
 
 set -euo pipefail
 
-gdbserver :1145 ./cli daemon --devnode /dev/input/event0 --led /sys/class/leds/blue\:wifi --led /sys/class/leds/red\:os --led /sys/class/leds/green\:internet --config-fs /sys/kernel/config/usb_gadget/g1 --ifname usb0 "$@"
+gdbserver :1145 ./cli daemon --devnode /dev/input/event0 --led /sys/class/leds/blue\:wifi --led /sys/class/leds/red\:os --led /sys/class/leds/green\:internet --config-fs /sys/kernel/config/usb_gadget/g1 "$@"
