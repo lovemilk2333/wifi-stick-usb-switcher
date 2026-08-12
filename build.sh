@@ -7,10 +7,17 @@ BUILD_DIR="build"
 [[ " $* " =~ " --debug " ]] && DEBUG=true || DEBUG=false
 GO_BUILD_FLAGS=()
 
+COMMIT_HASH=$(git rev-parse HEAD)
+BUILD_TIME=$(date -u -Iseconds)
+
+LDFLAGS_VARS="-X 'main.CommitHash=${COMMIT_HASH}' -X 'main.BuildTime=${BUILD_TIME}'"
+
 if [ "$DEBUG" = true ]; then
     GO_BUILD_FLAGS+=("-gcflags=all=-N -l")
+    BASE_LDFLAGS="${LDFLAGS_VARS}"
 else
-    GO_BUILD_FLAGS+=("-ldflags=-s -w" "-trimpath")
+    GO_BUILD_FLAGS+=("-trimpath")
+    BASE_LDFLAGS="-s -w ${LDFLAGS_VARS}"
 fi
 
 ARCH="${1:-amd64}"
@@ -39,12 +46,14 @@ fi
 case "$GOARCH" in
     arm64)
         if [ "$DEBUG" = true ]; then
-            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build "${GO_BUILD_FLAGS[@]}" -ldflags "-linkmode external -extldflags -static" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
+            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+                go build "${GO_BUILD_FLAGS[@]}" -ldflags "${BASE_LDFLAGS} -linkmode external -extldflags -static" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
         else
-            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -trimpath -ldflags "-s -w -linkmode external -extldflags -static" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
+            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+                go build "${GO_BUILD_FLAGS[@]}" -ldflags "${BASE_LDFLAGS} -linkmode external -extldflags -static" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
         fi
     ;;
     *)
-        go build "${GO_BUILD_FLAGS[@]}" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
+        go build "${GO_BUILD_FLAGS[@]}" -ldflags "${BASE_LDFLAGS}" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
     ;;
 esac
