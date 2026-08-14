@@ -34,6 +34,9 @@ type DaemonCmd struct {
 	RndisSerialNumber    string           `arg:"--rndis-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the rndis usb gadget device"`
 	RndisManufacturer    string           `arg:"--rndis-manufacturer" default:"wifi-stick" help:"the manufacturer string of the rndis usb gadget device"`
 	RndisProduct         string           `arg:"--rndis-product" default:"RNDIS Ethernet" help:"the product string of the rndis usb gadget device"`
+	AdbSerialNumber      string           `arg:"--adb-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the adb usb gadget device"`
+	AdbManufacturer      string           `arg:"--adb-manufacturer" default:"Google" help:"the manufacturer string of the adb usb gadget device"`
+	AdbProduct           string           `arg:"--adb-product" default:"ADB Gadget" help:"the product string of the adb usb gadget device"`
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
 	// TickRate             time.Duration    `arg:"--tick-rate" default:"10ms" help:"daemon event loop tick rate"`
 }
@@ -139,7 +142,7 @@ func (this *Daemon) init(cmd DaemonCmd) error {
 
 	this.modes = []usb.UsbGadgetFunction{
 		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
-		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb"),
+		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct),
 	}
 
 	// ---- initialise LEDs --------------------------------------------------

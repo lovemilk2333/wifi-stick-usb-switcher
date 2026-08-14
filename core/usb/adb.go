@@ -24,6 +24,11 @@ type UsbGadgetAdb struct {
 	dev_name string
 	ffs_path string
 
+	// USB 描述符字符串,由 --adb-serial-number 等参数传入
+	serial_number string
+	manufacturer  string
+	product       string
+
 	UsbGadgetFunctionBase
 }
 
@@ -84,13 +89,13 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 
 	// TODO move following lines to Base
 	// Override strings.
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, "wifi-stick-miruku"); err != nil {
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, this.serial_number); err != nil {
 		return fmt.Errorf("write serialnumber: %w", err)
 	}
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, "Google"); err != nil {
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, this.manufacturer); err != nil {
 		return fmt.Errorf("write manufacturer: %w", err)
 	}
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, "ADB Gadget"); err != nil {
+	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, this.product); err != nil {
 		return fmt.Errorf("write product: %w", err)
 	}
 
@@ -208,11 +213,14 @@ func SnapshotUsbGadgetAdb(instance string) *UsbGadgetAdb {
 	return adb
 }
 
-func NewUsbGadgetAdb(ffs_path string) *UsbGadgetAdb {
+func NewUsbGadgetAdb(ffs_path string, serial_number string, manufacturer string, product string) *UsbGadgetAdb {
 	adb := &UsbGadgetAdb{}
 
 	adb.dev_name = "adb"
 	adb.ffs_path = ffs_path
+	adb.serial_number = serial_number
+	adb.manufacturer = manufacturer
+	adb.product = product
 
 	adb._type = "ffs"
 	adb.code = USB_GADGET_FUNCTION_CODE_ADB
