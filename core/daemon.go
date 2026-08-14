@@ -48,6 +48,7 @@ type Daemon struct {
 	current_mode  int
 	mode_changed  bool
 	mode_changing bool
+	turn_off_leds bool
 	tick_rate     time.Duration
 }
 
@@ -62,7 +63,7 @@ func NewDaemon(cmd DaemonCmd, tick_rate time.Duration) (*Daemon, error) {
 
 // Mainloop runs the daemon event loop at the configured tick rate.
 func (this *Daemon) Mainloop() {
-	log.Printf("daemon started\n")
+	log.Printf("INFO daemon started\n")
 	ticker := time.NewTicker(this.tick_rate)
 	defer ticker.Stop()
 
@@ -220,6 +221,9 @@ func (this *Daemon) Tick() {
 	}
 
 	for _, interpreter := range this.interpreters {
+		if this.turn_off_leds {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
 		interpreter.Tick()
 	}
 }
