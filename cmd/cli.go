@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	"github.com/alexflint/go-arg"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core"
@@ -31,7 +30,7 @@ func main() {
 	case args.Version != nil:
 		fmt.Printf("Version: %s\nBuilt: %s\n", CommitHash, BuildTime)
 	case args.Daemon != nil:
-		daemon, err := core.NewDaemon(*args.Daemon, time.Millisecond*10)
+		daemon, err := core.NewDaemon(*args.Daemon)
 		if err != nil {
 			log.Fatalf("FATAL: %s\n", err)
 		}

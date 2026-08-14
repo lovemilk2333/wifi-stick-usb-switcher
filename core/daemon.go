@@ -38,7 +38,7 @@ type DaemonCmd struct {
 	AdbManufacturer      string           `arg:"--adb-manufacturer" default:"Google" help:"the manufacturer string of the adb usb gadget device"`
 	AdbProduct           string           `arg:"--adb-product" default:"ADB Gadget" help:"the product string of the adb usb gadget device"`
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
-	// TickRate             time.Duration    `arg:"--tick-rate" default:"10ms" help:"daemon event loop tick rate"`
+	TickRate             time.Duration    `arg:"--tick-rate" default:"50ms" help:"daemon event loop tick rate"`
 }
 
 type Daemon struct {
@@ -55,9 +55,9 @@ type Daemon struct {
 	tick_rate     time.Duration
 }
 
-func NewDaemon(cmd DaemonCmd, tick_rate time.Duration) (*Daemon, error) {
+func NewDaemon(cmd DaemonCmd) (*Daemon, error) {
 	daemon := &Daemon{}
-	daemon.tick_rate = tick_rate
+	daemon.tick_rate = cmd.TickRate
 	if err := daemon.init(cmd); err != nil {
 		return nil, err
 	}
