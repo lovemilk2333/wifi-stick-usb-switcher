@@ -310,29 +310,6 @@ func nmDeviceIsUnmanaged(ifname string) (bool, bool) {
 	return strings.Contains(string(out), "unmanaged"), true
 }
 
-// EnsureEnabled 自愈检查,由 daemon Tick 周期性调用:外部因素(NM 接管、
-// 系统网络脚本等)清掉 RNDIS 接口的 IP 时重新顶上。幂等 — 一切正常时
-// 开销只有一次地址查询。
-func (this *UsbGadgetRndis) EnsureEnabled() {
-	ifname := this.ifname
-	if ifname == "" {
-		return // 还没 enable 过(模式切换中)
-	}
-	if hasIfaceAddr(ifname, this.ip_addr.String()) {
-		return // IP 还在,无事
-	}
-	log.Printf("INFO: rndis address `%s` missing on `%s`, re-asserting\n", this.ip_addr, ifname)
-
-	this.unmanageFromNetworkManager(ifname)
-	if out, err := exec.Command("ip", "link", "set", ifname, "up").CombinedOutput(); err != nil {
-		log.Printf("WARN: `ip link set %s up`: %v, output: %s\n", ifname, err, string(out))
-	}
-	if out, err := exec.Command("ip", "addr", "add", this.ip_addr.String(), "dev", ifname).CombinedOutput(); err != nil && !hasIfaceAddr(ifname, this.ip_addr.String()) {
-		log.Printf("WARN: `ip addr add %s dev %s`: %v, output: %s\n", this.ip_addr, ifname, err, string(out))
-	}
-	this.startDnsmasq() // 幂等:已在跑就跳过
-}
-
 // startDnsmasq 在接口上启动 dnsmasq DHCP 服务器,供 USB host 获取地址。
 // 池从本机 IP 之后到子网最后一个地址;--port=0 关闭 DNS,避免与系统
 // dnsmasq 冲突(系统实例已禁用,本实例独占 67 端口)。

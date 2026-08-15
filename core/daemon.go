@@ -41,9 +41,6 @@ type DaemonCmd struct {
 	TickRate             time.Duration    `arg:"--tick-rate" default:"50ms" help:"daemon event loop tick rate"`
 }
 
-// rndisWatchdogInterval — RNDIS 自愈检查间隔,独立于 --tick-rate。
-const rndisWatchdogInterval = 20 * time.Second
-
 type Daemon struct {
 	base.PathChecker
 
@@ -234,18 +231,6 @@ func (this *Daemon) Tick() {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
 		interpreter.Tick()
-	}
-
-	// RNDIS 自愈:外部因素(如 NetworkManager 接管)清掉 usb0 的 IP 后
-	// 重新顶上。按墙钟计时而不是 tick 计数 — tick 间隔可配置
-	// (--tick-rate),计数会随 tick 速率漂移。
-	if time.Since(this.watchdog_last) >= rndisWatchdogInterval {
-		this.watchdog_last = time.Now()
-		if !this.mode_changing {
-			if rndis, ok := this.modes[this.current_mode].(*usb.UsbGadgetRndis); ok {
-				rndis.EnsureEnabled()
-			}
-		}
 	}
 }
 
