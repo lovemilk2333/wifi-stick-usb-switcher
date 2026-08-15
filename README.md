@@ -113,7 +113,7 @@ cli daemon [flags]
 - **ifname 属性必须写模式**:内核(≥5.12,`gether_set_ifname`)要求 ifname 写成接口模式(`usb%d`),写具体名字(`usb0`)会返回 `-EINVAL`。绑定后内核按空闲号分配真实接口名,程序读回属性解析。
 - **`gc -l` 是只读的**:它是 configfs 的只读快照,不会解绑;而 `gc -a/-c/-e/-d/-r` 每次调用末尾都会解绑 gadget。解析以 tab 分隔键值(键里没有 tab,值里可以有空格,`Serial Number` 键本身也含空格)。
 - **configfs 不能创建文件**:写一个不存在的属性路径返回 EACCES,写入必须是 `exist_only` 语义(先 stat 再写)。
-- **NetworkManager 让位**:向 `/run/NetworkManager/conf.d/` 写 unmanaged 配置并 SIGHUP 重载;NM 接管时会把 usb0 当 DHCP client,永远拿不到地址还会清掉配置的 IP。
+- **NetworkManager 让位**:向 `/etc/NetworkManager/conf.d/<PROJECT_IDENT>.conf` 写持久 unmanaged 配置(NM 启动加载早于 usb0 出现,注册即 unmanaged),写入后 SIGHUP 重载并校验,失效时用 `nmcli device set ... managed no` 兜底;NM 接管时会把 usb0 当 DHCP client,永远拿不到地址还会清掉配置的 IP。
 - **进程管理**:adbd 和 dnsmasq 都通过 pid 文件 + `/proc/<pid>/cmdline` 校验来追踪,pid 复用也不会误杀无关进程;不会无差别 killall。
 
 ## 目录结构

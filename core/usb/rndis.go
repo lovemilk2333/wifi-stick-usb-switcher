@@ -192,9 +192,8 @@ func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string)
 	this.ifname = ifname // 让 dnsmasq pid 文件等后续逻辑用真实名字
 
 	this.unmanageFromNetworkManager(ifname)
-
-	// NM 释放接口是异步的,等它交还后再配 IP,否则地址会被 NM 收尾清掉
-	time.Sleep(500 * time.Millisecond)
+	// unmanageFromNetworkManager 内部已等 NM 标记 unmanaged(并兜底),
+	// 接口归属确定,直接配 IP
 
 	if out, err := exec.Command("ip", "link", "set", ifname, "up").CombinedOutput(); err != nil {
 		log.Printf("WARN: `ip link set %s up`: %v, output: %s\n", ifname, err, string(out))
@@ -239,28 +238,99 @@ func hasIfaceAddr(ifname, ipSpec string) bool {
 	return false
 }
 
-// unmanageFromNetworkManager 让 NetworkManager 不接管 ifname:写
-// unmanaged 配置(易失 /run)并向 NM 发 SIGHUP 重载 — 不依赖 nmcli
-// 工具;NM 未安装/未运行时两步都是无害 no-op。NM 接管后会把 usb0
-// 当 DHCP client(method=auto)用,永远拿不到地址,超时后清掉我们配
-// 的 IP — 必须让开。
+// unmanageFromNetworkManager 让 NetworkManager 不接管 ifname。NM 接管
+// 后会把 usb0 当 DHCP client(method=auto),永远拿不到地址,超时后清掉
+// 我们配的 IP,再每 45s 无限重试 — 必须让开。
+//
+// 持久规则写 /etc/NetworkManager/conf.d/<PROJECT_IDENT>.conf:NM 在
+// 启动时加载配置,而 usb0 是 daemon 绑定 UDC 之后才创建的 — 规则先于
+// 接口存在,usb0 注册即 unmanaged,开机无竞态。本次运行中 NM 已启动,
+// 内存配置里可能还没有这条规则(文件刚写入),所以写入后还要 SIGHUP
+// 重载,并校验是否生效,不行用 nmcli 直接改运行时状态兜底(实测
+// NM 1.30 的 SIGHUP 重载不会重新评估"已有"设备的 unmanaged 状态)。
+// NM 未安装/未运行时,以上步骤均为无害 no-op。
 func (this *UsbGadgetRndis) unmanageFromNetworkManager(ifname string) {
-	confPath := filepath.Join("/run/NetworkManager/conf.d", "wifi-stick-usb.conf")
-	content := "[device]\nmatch-device=interface-name:" + ifname + "\nmanaged=0\n"
-	// os.WriteFile 不建目录;/run/NetworkManager/conf.d 在无 NM 的系统上
-	// 不存在,先 MkdirAll 再写(没有 NM 时整步本就是无害 no-op)
+	// 不主动创建 /etc/NetworkManager(没装 NM 就别留垃圾)
+	if _, err := os.Stat("/etc/NetworkManager"); err != nil {
+		return
+	}
+	confPath := filepath.Join("/etc/NetworkManager/conf.d", base.PROJECT_IDENT+".conf")
 	if err := os.MkdirAll(filepath.Dir(confPath), 0755); err != nil {
 		log.Printf("WARN: mkdir %s: %v\n", filepath.Dir(confPath), err)
 		return
 	}
-	if err := os.WriteFile(confPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(confPath, []byte(unmanagedConf(ifname)), 0644); err != nil {
 		log.Printf("WARN: write %s: %v\n", confPath, err)
 		return
 	}
-	// SIGHUP 让 NM 立即重载配置(标准做法,不需要 nmcli)
+
+	reloadNetworkManager()
+
+	// 3) 校验生效;SIGHUP 重载对已有设备可能无效(实测),超时后用
+	//    nmcli 直接设运行时状态兜底。NM 未运行时立即放弃等。
+	for range 6 {
+		unmanaged, responsive := nmDeviceIsUnmanaged(ifname)
+		if !responsive {
+			return // NM 未运行,conf 已写入,等它下次启动时生效即可
+		}
+		if unmanaged {
+			return
+		}
+		reloadNetworkManager()
+		time.Sleep(500 * time.Millisecond)
+	}
+	if out, err := exec.Command("nmcli", "device", "set", ifname, "managed", "no").CombinedOutput(); err != nil {
+		log.Printf("WARN: `nmcli device set %s managed no`: %v, output: %s\n", ifname, err, string(out))
+	} else {
+		log.Printf("INFO: `nmcli device set %s managed no` (SIGHUP 重载未生效,已兜底)\n", ifname)
+	}
+}
+
+// unmanagedConf 生成 NetworkManager conf.d 的 unmanaged 规则。
+func unmanagedConf(ifname string) string {
+	return "[device]\nmatch-device=interface-name:" + ifname + "\nmanaged=0\n"
+}
+
+// reloadNetworkManager 向 NetworkManager 发 SIGHUP 重载配置(标准做法,
+// 不依赖 nmcli)。NM 未运行时是无害 no-op。
+func reloadNetworkManager() {
 	if out, err := exec.Command("sh", "-c", "kill -HUP $(pgrep -x NetworkManager) 2>/dev/null").CombinedOutput(); err != nil {
 		log.Printf("WARN: reload NetworkManager: %v, output: %s\n", err, string(out))
 	}
+}
+
+// nmDeviceIsUnmanaged 用 nmcli 查询 ifname 是否已被 NM 标为 unmanaged
+// (固定枚举值,不受 locale 影响)。返回 (是否 unmanaged, NM 是否可答);
+// NM 未安装/未运行或设备未知时 responsive 为 false。
+func nmDeviceIsUnmanaged(ifname string) (bool, bool) {
+	out, err := exec.Command("nmcli", "-t", "-f", "GENERAL.STATE", "device", "show", ifname).CombinedOutput()
+	if err != nil {
+		return false, false
+	}
+	return strings.Contains(string(out), "unmanaged"), true
+}
+
+// EnsureEnabled 自愈检查,由 daemon Tick 周期性调用:外部因素(NM 接管、
+// 系统网络脚本等)清掉 RNDIS 接口的 IP 时重新顶上。幂等 — 一切正常时
+// 开销只有一次地址查询。
+func (this *UsbGadgetRndis) EnsureEnabled() {
+	ifname := this.ifname
+	if ifname == "" {
+		return // 还没 enable 过(模式切换中)
+	}
+	if hasIfaceAddr(ifname, this.ip_addr.String()) {
+		return // IP 还在,无事
+	}
+	log.Printf("INFO: rndis address `%s` missing on `%s`, re-asserting\n", this.ip_addr, ifname)
+
+	this.unmanageFromNetworkManager(ifname)
+	if out, err := exec.Command("ip", "link", "set", ifname, "up").CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip link set %s up`: %v, output: %s\n", ifname, err, string(out))
+	}
+	if out, err := exec.Command("ip", "addr", "add", this.ip_addr.String(), "dev", ifname).CombinedOutput(); err != nil && !hasIfaceAddr(ifname, this.ip_addr.String()) {
+		log.Printf("WARN: `ip addr add %s dev %s`: %v, output: %s\n", this.ip_addr, ifname, err, string(out))
+	}
+	this.startDnsmasq() // 幂等:已在跑就跳过
 }
 
 // startDnsmasq 在接口上启动 dnsmasq DHCP 服务器,供 USB host 获取地址。
