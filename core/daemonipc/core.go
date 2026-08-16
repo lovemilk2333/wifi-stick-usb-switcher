@@ -28,65 +28,59 @@ type IPCPackage struct {
 	Payload any // any json
 }
 
-type IPCServerHandler func(this *IPCServer, payload any) (*IPCPackage, error)
+type IPCServerHandler func(this *IPCFramework, payload any) (*IPCPackage, error)
 
-type IPCServer struct {
-	ident  string
-	config *ipc.ServerConfig
+// https://pkg.go.dev/github.com/james-barrow/golang-ipc#Client
+// https://pkg.go.dev/github.com/james-barrow/golang-ipc#Server
+type IPCImpl interface {
+	Close()
+	Read() (*ipc.Message, error)
+	Status() string
+	StatusCode() ipc.Status
+	Write(msgType int, message []byte) error
+}
 
+type IPCFramework struct {
 	handlers        map[IPCPackageType]IPCServerHandler
 	handler_structs map[IPCPackageType]reflect.Type
 
-	server      *ipc.Server
-	server_flag sync.WaitGroup
+	ipc_impl IPCImpl
+	ipc_flag sync.WaitGroup
 }
 
-func NewIPCServer(ident string) *IPCServer {
-	return &IPCServer{
-		ident: ident,
-	}
+func NewIPCFramework() *IPCFramework {
+	return &IPCFramework{}
 }
 
-func (this *IPCServer) WithConfig(config *ipc.ServerConfig) *IPCServer {
-	this.config = config
-
-	return this
-}
-
-func (this *IPCServer) Start() error {
-	if this.server != nil {
-		return fmt.Errorf("server has already running")
+func (this *IPCFramework) Start(ipc_impl IPCImpl) error {
+	if this.ipc_impl != nil {
+		return fmt.Errorf("ipc server has already running")
 	}
 
-	server, err := ipc.StartServer(
-		this.ident,
-		this.config,
-	)
+	this.ipc_impl = ipc_impl
+	this.ipc_flag.Add(1)
 
-	if err != nil {
-		return err
-	}
-
-	this.server_flag.Add(1)
-
-	this.server = server
 	go this.mainloop()
 
 	return nil
 }
 
-func (this *IPCServer) Stop() {
-	this.server.Close()
+func (this *IPCFramework) Stop() {
+	this.ipc_impl.Close()
 	// wait goroutine
-	this.server_flag.Wait()
-	this.server = nil
+	this.ipc_flag.Wait()
+	this.ipc_impl = nil
 }
 
-func (this *IPCServer) mainloop() {
-	defer this.server_flag.Done()
+func (this *IPCFramework) Wait() {
+	this.ipc_flag.Wait()
+}
+
+func (this *IPCFramework) mainloop() {
+	defer this.ipc_flag.Done()
 
 	for {
-		msg, err := this.server.Read()
+		msg, err := this.ipc_impl.Read()
 		if err != nil {
 			log.Printf("WARN: package cannot receive: %v", err)
 		}
@@ -102,12 +96,7 @@ func (this *IPCServer) mainloop() {
 	}
 }
 
-func (this *IPCServer) parse_package(package_type IPCPackageType, data []byte) (*IPCPackage, error) {
-	payload_struct, ok := this.handler_structs[package_type]
-	if !ok {
-		return nil, fmt.Errorf("package cannot parse payload: no payload struct for `%d`", package_type)
-	}
-
+func (this *IPCFramework) parse_package(package_type IPCPackageType, payload_struct reflect.Type, data []byte) (*IPCPackage, error) {
 	payload := reflect.New(payload_struct).Interface()
 
 	err := json.Unmarshal(data, payload)
@@ -126,8 +115,13 @@ func (this *IPCServer) parse_package(package_type IPCPackageType, data []byte) (
 	}, nil
 }
 
-func (this *IPCServer) handle_data(package_type IPCPackageType, data []byte) error {
-	ipc_package, err := this.parse_package(package_type, data)
+func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) error {
+	payload_struct, ok := this.handler_structs[package_type]
+	if !ok {
+		return fmt.Errorf("package cannot parse payload: no payload struct for `%d`", package_type)
+	}
+
+	ipc_package, err := this.parse_package(package_type, payload_struct, data)
 	if err != nil {
 		return err
 	}
@@ -153,32 +147,32 @@ func (this *IPCServer) handle_data(package_type IPCPackageType, data []byte) err
 	return nil
 }
 
-func (this *IPCServer) pkg2binary(pkg *IPCPackage) ([]byte, error) {
+func (this *IPCFramework) pkg2payload(pkg *IPCPackage) ([]byte, error) {
 	if pkg == nil {
 		return nil, fmt.Errorf("package cannot convert to binary: package is nil")
 	}
 
-	pkg_binary, err := json.Marshal(pkg.Payload)
+	payload, err := json.Marshal(pkg.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("package cannot convert to binary: %w", err)
 	}
 
-	return pkg_binary, nil
+	return payload, nil
 }
 
-func (this *IPCServer) Send(pkg *IPCPackage) error {
-	payload, err := this.pkg2binary(pkg)
+func (this *IPCFramework) Send(pkg *IPCPackage) error {
+	payload, err := this.pkg2payload(pkg)
 	if err != nil {
 		return err
 	}
 
-	return this.server.Write(
+	return this.ipc_impl.Write(
 		int(pkg.Type),
 		payload,
 	)
 }
 
-func (this *IPCServer) RegisterHandler(package_type IPCPackageType, payload_struct reflect.Type, handler IPCServerHandler) error {
+func (this *IPCFramework) RegisterHandler(package_type IPCPackageType, payload_struct reflect.Type, handler IPCServerHandler) error {
 	if package_type <= 0 {
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}
@@ -190,7 +184,7 @@ func (this *IPCServer) RegisterHandler(package_type IPCPackageType, payload_stru
 	return this.RegisterHandlerReplace(package_type, payload_struct, handler)
 }
 
-func (this *IPCServer) RegisterHandlerReplace(package_type IPCPackageType, payload_struct reflect.Type, handler IPCServerHandler) error {
+func (this *IPCFramework) RegisterHandlerReplace(package_type IPCPackageType, payload_struct reflect.Type, handler IPCServerHandler) error {
 	if package_type <= 0 {
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}
@@ -200,7 +194,7 @@ func (this *IPCServer) RegisterHandlerReplace(package_type IPCPackageType, paylo
 	return nil
 }
 
-func (this *IPCServer) RemoveHandler(package_type IPCPackageType) error {
+func (this *IPCFramework) RemoveHandler(package_type IPCPackageType) error {
 	if package_type <= 0 {
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}

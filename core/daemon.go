@@ -7,7 +7,9 @@ import (
 	"net/netip"
 	"time"
 
+	ipc "github.com/james-barrow/golang-ipc"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/daemonipc"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/input"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/led"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/usb"
@@ -38,45 +40,67 @@ type DaemonCmd struct {
 	AdbManufacturer      string           `arg:"--adb-manufacturer" default:"Google" help:"the manufacturer string of the adb usb gadget device"`
 	AdbProduct           string           `arg:"--adb-product" default:"ADB Gadget" help:"the product string of the adb usb gadget device"`
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
+	IPCAllowOtherUser    bool             `arg:"--ipc-share, --ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
 	TickRate             time.Duration    `arg:"--tick-rate" default:"50ms" help:"daemon event loop tick rate"`
 }
 
 type Daemon struct {
 	base.PathChecker
 
-	input_device  *input.InputDevice
-	controller    *usb.UsbGadgetController
-	interpreters  []*led.LedInterpreter
-	modes         []usb.UsbGadgetFunction
-	current_mode  int
-	mode_changed  bool
-	mode_changing bool
-	turn_off_leds bool
-	tick_rate     time.Duration
-	watchdog_last time.Time
+	input_device     *input.InputDevice
+	controller       *usb.UsbGadgetController
+	interpreters     []*led.LedInterpreter
+	modes            []usb.UsbGadgetFunction
+	current_mode     int
+	mode_changed     bool
+	mode_changing    bool
+	turn_off_leds    bool
+	tick_rate        time.Duration
+	daemonipc        *daemonipc.IPCFramework
+	daemonipc_config *ipc.ServerConfig
 }
 
 func NewDaemon(cmd DaemonCmd) (*Daemon, error) {
 	daemon := &Daemon{}
 	daemon.tick_rate = cmd.TickRate
-	daemon.watchdog_last = time.Now()
 	if err := daemon.init(cmd); err != nil {
 		return nil, err
 	}
 	return daemon, nil
 }
 
+func (this *Daemon) GetTurnOffLeds() bool {
+	return this.turn_off_leds
+}
+
+func (this *Daemon) SetTurnOffLeds(off bool) {
+	this.turn_off_leds = off
+}
+
 // Mainloop runs the daemon event loop at the configured tick rate.
-func (this *Daemon) Mainloop() {
-	log.Printf("INFO daemon started\n")
+func (this *Daemon) Mainloop() error {
+	// TODO
+	// ipc_server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
+	// if err != nil {
+	// 	return err
+	// }
+
+	// err = this.daemonipc.Start(ipc_server)
+	// if err != nil {
+	// 	return err
+	// }
+
 	ticker := time.NewTicker(this.tick_rate)
 	defer ticker.Stop()
 
 	go this.applyFunction()
 
+	log.Printf("INFO daemon started\n")
 	for range ticker.C {
 		this.Tick()
 	}
+
+	return nil
 }
 
 var LED_MODE_BLINK *led.LedMode
@@ -157,6 +181,13 @@ func (this *Daemon) init(cmd DaemonCmd) error {
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
+
+	// ---- init ipc
+	// TODO
+	// this.daemonipc = daemonipc.InitServer(this)
+	// this.daemonipc_config = &ipc.ServerConfig{
+	// 	UnmaskPermissions: cmd.IPCAllowOtherUser,
+	// }
 
 	return nil
 }
