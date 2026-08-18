@@ -130,7 +130,7 @@ func (this *Daemon) init(cmd DaemonCmd) error {
 		return fmt.Errorf("`%s` is not a valid IP address", cmd.RndisIP)
 	}
 
-	LED_MODE_BLINK = led.NewLedMode().OnDuration(cmd.LedBlinkDuration).Wait(cmd.LedBlinkInterval)
+	LED_MODE_BLINK = led.NewLedMode().OnDuration(cmd.LedBlinkDuration).Wait(cmd.LedBlinkInterval).Done()
 
 	// ---- initialise input device ------------------------------------------
 
@@ -258,7 +258,7 @@ func (this *Daemon) Tick() {
 	}
 
 	for _, interpreter := range this.interpreters {
-		if this.turn_off_leds {
+		if this.turn_off_leds && interpreter.GetMode() != led.MODE_PRESET_OFF {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
 		interpreter.Tick()
