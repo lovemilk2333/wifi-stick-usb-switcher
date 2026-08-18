@@ -60,7 +60,7 @@ type Daemon struct {
 	daemonipc_config *ipc.ServerConfig
 }
 
-func NewDaemon(cmd DaemonCmd) (*Daemon, error) {
+func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
 	daemon := &Daemon{}
 	daemon.tick_rate = cmd.TickRate
 	if err := daemon.init(cmd); err != nil {
@@ -106,7 +106,7 @@ func (this *Daemon) Mainloop() error {
 var LED_MODE_BLINK *led.LedMode
 
 // init validates cmd and stores all initialised handles on the Daemon struct.
-func (this *Daemon) init(cmd DaemonCmd) error {
+func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- validate arguments ------------------------------------------------
 
 	if this.IsValidPath(cmd.Devnode, "/dev/input/", true, true) != base.PATH_STATUS_OK {
@@ -213,7 +213,11 @@ func (this *Daemon) applyFunction() {
 		log.Printf("WARN: cannot update gadget: %v\n", errs)
 	}
 
-	this.interpreters[this.current_mode].SetMode(led.MODE_PRESET_ON)
+	if !this.turn_off_leds {
+		this.interpreters[this.current_mode].SetMode(led.MODE_PRESET_ON)
+	} else {
+		this.interpreters[this.current_mode].SetMode(led.MODE_PRESET_OFF)
+	}
 
 	this.mode_changing = false
 }
@@ -258,9 +262,6 @@ func (this *Daemon) Tick() {
 	}
 
 	for _, interpreter := range this.interpreters {
-		if this.turn_off_leds && interpreter.GetMode() != led.MODE_PRESET_OFF {
-			interpreter.SetMode(led.MODE_PRESET_OFF)
-		}
 		interpreter.Tick()
 	}
 }

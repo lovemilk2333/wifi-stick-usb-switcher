@@ -71,8 +71,8 @@ func main() {
 		// call_ipc(args.IPC)
 		fmt.Printf("Not implemented yet\n")
 	case args.Daemon != nil:
-		cores := runtime.NumCPU()
-		last_core := cores - 1
+		core_count := runtime.NumCPU()
+		last_core := core_count - 1
 
 		err := lock2core(last_core)
 		if err != nil {
@@ -80,7 +80,7 @@ func main() {
 			return
 		}
 
-		daemon, err := core.NewDaemon(*args.Daemon)
+		daemon, err := core.NewDaemon(args.Daemon)
 		if err != nil {
 			log.Fatalf("FATAL: %s\n", err)
 			return

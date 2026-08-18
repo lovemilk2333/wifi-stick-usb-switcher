@@ -18,7 +18,7 @@ func InitServer(daemon daemonInterface) *IPCFramework {
 		func(this *IPCFramework, payload any) (*IPCPackage, error) {
 			data := payload.(ToggleLEDPayload)
 			switch data.Target {
-			case TOGGLE_LED_NONE:
+			case TOGGLE_LED_NONE: // resp current led state
 				break
 			case TOGGLE_LED_OFF:
 				daemon.SetTurnOffLeds(true)

@@ -28,7 +28,8 @@ type IPCPackage struct {
 	Payload any // any json
 }
 
-type IPCServerHandler func(this *IPCFramework, payload any) (*IPCPackage, error)
+type IPCFrameworkHandler func(this *IPCFramework, payload any) (*IPCPackage, error)
+type IPCFrameworkFallbackHandler func(this *IPCFramework, package_type IPCPackageType, data []byte) (*IPCPackage, error)
 
 // https://pkg.go.dev/github.com/james-barrow/golang-ipc#Client
 // https://pkg.go.dev/github.com/james-barrow/golang-ipc#Server
@@ -41,11 +42,13 @@ type IPCImpl interface {
 }
 
 type IPCFramework struct {
-	handlers        map[IPCPackageType]IPCServerHandler
+	handlers        map[IPCPackageType]IPCFrameworkHandler
 	handler_structs map[IPCPackageType]reflect.Type
 
 	ipc_impl IPCImpl
 	ipc_flag sync.WaitGroup
+
+	fallback_handler IPCFrameworkFallbackHandler
 }
 
 func NewIPCFramework() *IPCFramework {
@@ -116,28 +119,48 @@ func (this *IPCFramework) parse_package(package_type IPCPackageType, payload_str
 }
 
 func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) error {
-	payload_struct, ok := this.handler_structs[package_type]
-	if !ok {
-		return fmt.Errorf("package cannot parse payload: no payload struct for `%d`", package_type)
-	}
-
-	ipc_package, err := this.parse_package(package_type, payload_struct, data)
-	if err != nil {
-		return err
-	}
-
-	handler, ok := this.handlers[ipc_package.Type]
-	if !ok {
-		return fmt.Errorf("package cannot handle: missing handler for `%d`", ipc_package.Type)
-	}
-
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("WARN: package call handler panic: %v", r)
 		}
 	}()
 
-	resp_package, err := handler(this, ipc_package.Payload)
+	// fix: goto handle_resp jumps over variable declaration at line 147
+	var (
+		resp_package *IPCPackage
+		ipc_package  *IPCPackage
+		err          error
+		handler      IPCFrameworkHandler
+		ok           bool
+	)
+
+	payload_struct, ok := this.handler_structs[package_type]
+	if !ok {
+		resp_package, err = this.fallback_handler(this, package_type, data)
+		if err != nil {
+			return fmt.Errorf("package cannot get payload struct for `%d`: %w", package_type, err)
+		}
+
+		goto handle_resp
+	}
+
+	ipc_package, err = this.parse_package(package_type, payload_struct, data)
+	if err != nil {
+		resp_package, err = this.fallback_handler(this, package_type, data)
+		if err != nil {
+			return fmt.Errorf("package cannot parse payload: no payload struct for `%d`: %w", package_type, err)
+		}
+
+		goto handle_resp
+	}
+
+	handler, ok = this.handlers[ipc_package.Type]
+	if !ok {
+		return fmt.Errorf("package cannot handle: missing handler for `%d`", ipc_package.Type)
+	}
+	resp_package, err = handler(this, ipc_package.Payload)
+
+handle_resp:
 	if err != nil {
 		return fmt.Errorf("package call handler error: %w", err)
 	} else if resp_package != nil {
@@ -172,7 +195,7 @@ func (this *IPCFramework) Send(pkg *IPCPackage) error {
 	)
 }
 
-func (this *IPCFramework) RegisterHandler(package_type IPCPackageType, payload_struct reflect.Type, handler IPCServerHandler) error {
+func (this *IPCFramework) RegisterHandler(package_type IPCPackageType, payload_struct reflect.Type, handler IPCFrameworkHandler) error {
 	if package_type <= 0 {
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}
@@ -184,7 +207,7 @@ func (this *IPCFramework) RegisterHandler(package_type IPCPackageType, payload_s
 	return this.RegisterHandlerReplace(package_type, payload_struct, handler)
 }
 
-func (this *IPCFramework) RegisterHandlerReplace(package_type IPCPackageType, payload_struct reflect.Type, handler IPCServerHandler) error {
+func (this *IPCFramework) RegisterHandlerReplace(package_type IPCPackageType, payload_struct reflect.Type, handler IPCFrameworkHandler) error {
 	if package_type <= 0 {
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}
@@ -202,4 +225,12 @@ func (this *IPCFramework) RemoveHandler(package_type IPCPackageType) error {
 	delete(this.handlers, package_type)
 	delete(this.handler_structs, package_type)
 	return nil
+}
+
+func (this *IPCFramework) GetFallbackHandler() IPCFrameworkFallbackHandler {
+	return this.fallback_handler
+}
+
+func (this *IPCFramework) SetFallbackHandler(handler IPCFrameworkFallbackHandler) {
+	this.fallback_handler = handler
 }
