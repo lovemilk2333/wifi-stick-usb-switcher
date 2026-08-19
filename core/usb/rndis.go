@@ -127,10 +127,10 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 
 	// Override device IDs and class codes — gc defaults (from cmake config)
 	// differ from the RNDIS-mode values we need.
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x1d6b"); err != nil {
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x18d1"); err != nil {
 		return fmt.Errorf("write idVendor: %w", err)
 	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x0104"); err != nil {
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x4ee4"); err != nil {
 		return fmt.Errorf("write idProduct: %w", err)
 	}
 	if err := ctx.setAttr(USB_GADGET_SUBPATH_BCD_USB, "0x0200"); err != nil {
