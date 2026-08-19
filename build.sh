@@ -45,13 +45,7 @@ fi
 
 case "$GOARCH" in
     arm64)
-        if [ "$DEBUG" = true ]; then
-            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
-                go build "${GO_BUILD_FLAGS[@]}" -ldflags "${BASE_LDFLAGS} -linkmode external -extldflags -static" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
-        else
-            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
-                go build "${GO_BUILD_FLAGS[@]}" -ldflags "${BASE_LDFLAGS} -linkmode external -extldflags -static" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
-        fi
+        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build "${GO_BUILD_FLAGS[@]}" -ldflags "${BASE_LDFLAGS} -linkmode external -extldflags -static" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
     ;;
     *)
         go build "${GO_BUILD_FLAGS[@]}" -ldflags "${BASE_LDFLAGS}" -o "$BUILD_DIR_FULL/cli" ./cmd/cli.go
