@@ -14,9 +14,9 @@ func InitServer(daemon daemonInterface) *IPCFramework {
 
 	fw.RegisterHandler(
 		PACKAGE_TOGGLE_LED,
-		reflect.TypeOf(ToggleLEDPayload{}),
+		reflect.TypeFor[ToggleLEDPayload](),
 		func(this *IPCFramework, payload any) (*IPCPackage, error) {
-			data := payload.(ToggleLEDPayload)
+			data := payload.(*ToggleLEDPayload)
 			switch data.Target {
 			case TOGGLE_LED_NONE: // resp current led state
 				break
