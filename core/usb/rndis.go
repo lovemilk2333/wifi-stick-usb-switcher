@@ -157,6 +157,60 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 		return fmt.Errorf("write product: %w", err)
 	}
 
+	// 配置级属性对齐 vendor 参考脚本 original-rndis.sh:MaxPower 120mA +
+	// 配置名 "RNDIS"(gc 默认只建了 configs/c1.1,不写则是 2mA、无配置名)。
+	if err := ctx.WriteSubpath(base.Subpath("configs/c1.1/MaxPower"), true, []byte("120\n")); err != nil {
+		return fmt.Errorf("write configs/c1.1/MaxPower: %w", err)
+	}
+	if err := ctx.WriteSubpath(base.Subpath("configs/c1.1/strings/0x409/configuration"), true, []byte("RNDIS\n")); err != nil {
+		return fmt.Errorf("write configs/c1.1/strings/0x409/configuration: %w", err)
+	}
+
+	// ---- MS OS Descriptor 1.0 (Extended Compat ID) -----------------------
+	// Windows 的 inbox RNDIS 驱动(usb8023.sys)靠 Extended Compat ID 的
+	// compatible_id="RNDIS" 匹配接口并自动安装驱动;没有 os_desc 时 Windows
+	// 枚举不到 RNDIS 接口,设备管理器显示"其他设备"(代码 28)。此 block
+	// 复刻 vendor 参考脚本 original-rndis.sh(同款内核,实测可被 Windows
+	// 自动识别为 RNDIS 设备)。os_desc 目录由内核在 gadget 创建时自动生成,
+	// use/b_vendor_code/qw_sign 属性已存在,只需写值。
+	funcSub := "functions/" + this._type + "." + instance
+	if err := ctx.WriteSubpath(base.Subpath("os_desc/use"), true, []byte("1")); err != nil {
+		return fmt.Errorf("write os_desc/use: %w", err)
+	}
+	if err := ctx.WriteSubpath(base.Subpath("os_desc/b_vendor_code"), true, []byte("0xcd")); err != nil {
+		return fmt.Errorf("write os_desc/b_vendor_code: %w", err)
+	}
+	// qw_sign 内核原样存 8 字节(实测读回 "MSFT100\n"),写法与 vendor
+	// echo 的字节一致。
+	if err := ctx.WriteSubpath(base.Subpath("os_desc/qw_sign"), true, []byte("MSFT100\n")); err != nil {
+		return fmt.Errorf("write os_desc/qw_sign: %w", err)
+	}
+
+	// 函数级 interface 兼容 ID:内核写入时去掉尾随换行、补 0 到 8 字节
+	// (实测读回 "RNDIS\0\0\0" / "5162001\0"),Windows 拿到的就是
+	// "RNDIS" + sub_compatible_id 5162001。
+	interfaceOsDescDir := filepath.Join(ctx.Basepath, funcSub, "os_desc", "interface.rndis")
+	if err := os.MkdirAll(interfaceOsDescDir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Join(funcSub, "os_desc", "interface.rndis"), err)
+	}
+	if err := ctx.WriteSubpath(base.Subpath(funcSub+"/os_desc/interface.rndis/compatible_id"), true, []byte("RNDIS\n")); err != nil {
+		return fmt.Errorf("write compatible_id: %w", err)
+	}
+	if err := ctx.WriteSubpath(base.Subpath(funcSub+"/os_desc/interface.rndis/sub_compatible_id"), true, []byte("5162001\n")); err != nil {
+		return fmt.Errorf("write sub_compatible_id: %w", err)
+	}
+
+	// 绑定前把 config 链到 os_desc:composite_bind 靠这个链接把 Extended
+	// Compat ID 描述符挂到 config 上。链接必须建在 os_desc 目录内、目标用
+	// 绝对路径 —— 裸相对路径会被 configfs 按 os_desc 内路径解析(实测
+	// `ln -s configs/c1.1 os_desc` 报 ENOENT)。每次 apply 前 gc -c 已把
+	// gadget 目录删掉重建,这里防御性先删旧链接再建。
+	osDescConfigLink := filepath.Join(ctx.Basepath, "os_desc", "c1.1")
+	_ = os.Remove(osDescConfigLink)
+	if err := os.Symlink(filepath.Join(ctx.Basepath, "configs", "c1.1"), osDescConfigLink); err != nil {
+		return fmt.Errorf("link os_desc -> configs/c1.1: %w", err)
+	}
+
 	// 清场:离开 ADB 模式后 orphaned adbd 还在 poll /dev/usb-ffs/adb,
 	// 停掉本 daemon 启动的它(句柄/pid 文件校验,不是无差别 killall);
 	// 上一轮 RNDIS 的 dnsmasq(接口已随 gadget 消失)也一并停掉。
