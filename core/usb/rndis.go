@@ -286,6 +286,13 @@ func (this *UsbGadgetRndis) enableGatewayMode(ifname string) error {
 // 与物理网卡 DHCP 接管一致。探测失败/掩码非连续/prefix >= /30(分
 // 不出可用地址)时直接跳回 submode 0 走主模式,保证 stick 始终可达。
 func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
+	// 探测前先配临时地址:实测 usb0 无 IPv4 地址时收不到上游 DHCP 应答
+	// (手动 udhcpc 成功时 usb0 都带着地址)。失败回退主模式时这个地址
+	// 正好就是 --rndis-ip,不用额外处理。
+	if err := addIfaceAddr(ifname, this.ip_addr.String()); err != nil {
+		log.Printf("WARN: %v\n", err)
+	}
+
 	subnet, router, err := probeUpstreamDhcp(ifname, this.dhcp_timeout)
 	if err != nil {
 		log.Printf("WARN: dhcp probe failed, fallback to gateway mode: %v\n", err)
@@ -299,6 +306,11 @@ func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 	if prefix >= 30 { // /30 只有 2 个可用地址,没有分配给客户端的余量
 		log.Printf("WARN: upstream prefix /%d too small, fallback to gateway mode\n", prefix)
 		return this.fallbackToGatewayMode()
+	}
+
+	// 探测成功:清掉临时地址,换成计算出的地址
+	if out, err := exec.Command("ip", "addr", "flush", "dev", ifname).CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip addr flush dev %s`: %v, output: %s\n", ifname, err, string(out))
 	}
 
 	network := netip.PrefixFrom(router, prefix).Masked().Addr()
@@ -339,7 +351,6 @@ func addIfaceAddr(ifname, ipSpec string) error {
 
 // probeUpstreamDhcp 用 dhcpv4 库做一次完整 DHCP 交换(Discover→Request),
 // 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端
-// (实测固件 Debian 11 无 udhcpc)。
 func probeUpstreamDhcp(ifname string, timeout time.Duration) (netip.Addr, netip.Addr, error) {
 	client, err := nclient4.New(ifname, nclient4.WithTimeout(timeout))
 	if err != nil {
