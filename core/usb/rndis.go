@@ -28,6 +28,7 @@ type UsbGadgetRndis struct {
 	connection_prefix string
 	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
 	dhcp_timeout      time.Duration // 上游 DHCP 探测超时(--rndis-dhcp-timeout)
+	dhcp_debug        bool          // 打印 DHCP 包详情(--rndis-dhcp-debug)
 
 	dev_addr     string
 	host_addr    string
@@ -293,7 +294,7 @@ func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 		log.Printf("WARN: %v\n", err)
 	}
 
-	subnet, router, err := probeUpstreamDhcp(ifname, this.dhcp_timeout)
+	subnet, router, err := this.probeUpstreamDhcp(ifname)
 	if err != nil {
 		log.Printf("WARN: dhcp probe failed, fallback to gateway mode: %v\n", err)
 		return this.fallbackToGatewayMode()
@@ -350,14 +351,20 @@ func addIfaceAddr(ifname, ipSpec string) error {
 }
 
 // probeUpstreamDhcp 用 dhcpv4 库做一次完整 DHCP 交换(Discover→Request),
-// 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端
-func probeUpstreamDhcp(ifname string, timeout time.Duration) (netip.Addr, netip.Addr, error) {
-	client, err := nclient4.New(ifname, nclient4.WithTimeout(timeout))
+// 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端。
+// dhcp_debug 开启时打印收发包详情(排查询题用,与 tools/dhcp-test 的
+// client -v 同一套 nclient4 日志)。
+func (this *UsbGadgetRndis) probeUpstreamDhcp(ifname string) (netip.Addr, netip.Addr, error) {
+	opts := []nclient4.ClientOpt{nclient4.WithTimeout(this.dhcp_timeout)}
+	if this.dhcp_debug {
+		opts = append(opts, nclient4.WithDebugLogger())
+	}
+	client, err := nclient4.New(ifname, opts...)
 	if err != nil {
 		return netip.Addr{}, netip.Addr{}, fmt.Errorf("create dhcp client on %s: %w", ifname, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), this.dhcp_timeout)
 	defer cancel()
 	lease, err := client.Request(ctx, dhcpv4.WithRequestedOptions(dhcpv4.OptionSubnetMask, dhcpv4.OptionRouter))
 	if err != nil {
@@ -623,13 +630,14 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, dhcp_timeout time.Duration, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, dhcp_timeout time.Duration, dhcp_debug bool, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
 	rndis.connection_prefix = connection_prefix
 	rndis.client_ip = client_ip
 	rndis.dhcp_timeout = dhcp_timeout
+	rndis.dhcp_debug = dhcp_debug
 	rndis.dev_addr = dev_addr
 	rndis.host_addr = host_addr
 	rndis.ifname = ifname
