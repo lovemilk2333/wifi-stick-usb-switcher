@@ -9,6 +9,13 @@ daemon 从模式的行为等价,但每一步手动,便于定位问题:
 > 发 DHCPRELEASE 终止租约,只取网段;insomniacslk/dhcp 的 nclient4 收不到
 > Windows ICS 的 Offer,已弃用)。daemon 侧探测受 `--rndis-client-timeout`
 > 总预算约束,本页手动执行不受限。
+>
+> daemon 拿到的上游 DNS 写进 resolvconf 的 tail 文件
+> (`/etc/resolvconf/resolv.conf.d/tail`):resolvconf 聚合生成
+> /etc/resolv.conf 时把该文件内容追加到末尾,NetworkManager 走
+> resolvconf 后端重写时条目不丢,不像直接写文件会被覆盖。写入后
+> `resolvconf -u` 立即生效;tail 原有内容先备份,离开从模式时还原。
+> 固件需装有 resolvconf 包(`apt install resolvconf`)。
 
 - 手动 DHCP 客户端也拿不到租约 → 上游 DHCP 问题(如 Windows ICS 未开启),
   与 daemon 无关

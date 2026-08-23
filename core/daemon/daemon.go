@@ -51,17 +51,17 @@ type DaemonCmd struct {
 type Daemon struct {
 	base.PathChecker
 
-	input_device     *input.InputDevice
-	controller       *usb.UsbGadgetController
-	interpreters     []*led.LedInterpreter
-	modes            []usb.UsbGadgetFunction
-	current_mode     int
-	mode_changed     bool
-	mode_changing    bool
+	input_device  *input.InputDevice
+	controller    *usb.UsbGadgetController
+	interpreters  []*led.LedInterpreter
+	modes         []usb.UsbGadgetFunction
+	current_mode  int
+	mode_changed  bool
+	mode_changing bool
 	// submode 选择中的切换(submode_changed):函数不变,applyFunction
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
-	submode_changed bool
+	submode_changed  bool
 	turn_off_leds    bool
 	tick_rate        time.Duration
 	daemonipc        *daemonipc.IPCFramework
