@@ -35,7 +35,7 @@ type DaemonCmd struct {
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
 	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP template (x.x.x.x, zero bytes take the upstream subnet bytes) of the stick in RNDIS client submode, e.g. 0.0.22.33"`
 	RndisDhcpTimeout     time.Duration    `arg:"--rndis-dhcp-timeout" default:"3s" help:"the DHCP probe timeout of the RNDIS client submode, such as 3s, 10s"`
-	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"5s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 5s, 30s"`
+	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"15s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 15s, 30s"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
 	RndisSerialNumber    string           `arg:"--rndis-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the rndis usb gadget device"`
 	RndisManufacturer    string           `arg:"--rndis-manufacturer" default:"wifi-stick" help:"the manufacturer string of the rndis usb gadget device"`
