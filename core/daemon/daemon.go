@@ -40,6 +40,7 @@ type DaemonCmd struct {
 	AdbSerialNumber      string           `arg:"--adb-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the adb usb gadget device"`
 	AdbManufacturer      string           `arg:"--adb-manufacturer" default:"Google" help:"the manufacturer string of the adb usb gadget device"`
 	AdbProduct           string           `arg:"--adb-product" default:"ADB Gadget" help:"the product string of the adb usb gadget device"`
+	AdbEnv               []string         `arg:"--adb-env,separate" help:"extra environment variables (KEY=VALUE) passed to the adbd process, repeatable, e.g. --adb-env=TERM=xterm-256color; default TERM=xterm-256color"`
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
 	IPCAllowOtherUser    bool             `arg:"--ipc-share, --ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
 	TickRate             time.Duration    `arg:"--tick-rate" default:"50ms" help:"daemon event loop tick rate"`
@@ -154,6 +155,12 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	// 初始 true:见 struct 注释 —— 启动时不要误触发关闭期检查
 	this.submode_entry_done = true
 
+	// go-arg 的 slice 默认值分隔行为不可靠,默认环境变量在这里补:
+	// adb shell 需要正确的终端类型
+	if len(cmd.AdbEnv) == 0 {
+		cmd.AdbEnv = []string{"TERM=xterm-256color"}
+	}
+
 	LED_MODE_BLINK = led.NewLedMode().OnDuration(cmd.LedBlinkDuration).Wait(cmd.LedBlinkInterval).Done()
 
 	// 进入/退出子模式选择时的过渡模式:LED 关闭 submode_led_duration 时间
@@ -199,7 +206,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	this.modes = []usb.UsbGadgetFunction{
 		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
-		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct),
+		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv),
 	}
 
 	// ---- initialise LEDs --------------------------------------------------

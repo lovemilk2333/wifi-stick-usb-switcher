@@ -29,6 +29,10 @@ type UsbGadgetAdb struct {
 	manufacturer  string
 	product       string
 
+	// envs 是传给 adbd 进程的额外环境变量(KEY=VALUE),由 --adb-env 传入,
+	// 默认 ["TERM=xterm-256color"],保证 adb shell 有正确的终端类型。
+	envs []string
+
 	UsbGadgetFunctionBase
 }
 
@@ -122,6 +126,7 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 	}
 	adbd_process = exec.Command("adbd", "-D")
 	adbd_process.Dir = homedir
+	adbd_process.Env = mergeEnvs(this.envs)
 	if err := adbd_process.Start(); err != nil {
 		adbd_process = nil
 		return fmt.Errorf("start adbd: %w", err)
@@ -140,6 +145,31 @@ func (this *UsbGadgetAdb) effect(ctx UsbGadgetContext, gc func(args ...string) (
 	time.Sleep(100 * time.Millisecond)
 
 	return nil
+}
+
+// mergeEnvs 返回继承自当前进程的环境,并把额外环境变量(KEY=VALUE)合并进去。
+// 若父环境已有同名 KEY,用额外值替换(exec 按顺序取第一个匹配,直接 append
+// 会被系统已有值覆盖)。
+func mergeEnvs(extras []string) []string {
+	env := append([]string{}, os.Environ()...)
+	for _, extra := range extras {
+		if extra == "" {
+			continue
+		}
+
+		key := strings.SplitN(extra, "=", 2)[0] + "="
+		replaced := false
+		for i, kv := range env {
+			if strings.HasPrefix(kv, key) {
+				env[i] = extra
+				replaced = true
+			}
+		}
+		if !replaced {
+			env = append(env, extra)
+		}
+	}
+	return env
 }
 
 // killAdbd stops the adbd started by THIS daemon — precisely, never a
@@ -213,7 +243,7 @@ func SnapshotUsbGadgetAdb(instance string) *UsbGadgetAdb {
 	return adb
 }
 
-func NewUsbGadgetAdb(ffs_path string, serial_number string, manufacturer string, product string) *UsbGadgetAdb {
+func NewUsbGadgetAdb(ffs_path string, serial_number string, manufacturer string, product string, envs []string) *UsbGadgetAdb {
 	adb := &UsbGadgetAdb{}
 
 	adb.dev_name = "adb"
@@ -221,6 +251,7 @@ func NewUsbGadgetAdb(ffs_path string, serial_number string, manufacturer string,
 	adb.serial_number = serial_number
 	adb.manufacturer = manufacturer
 	adb.product = product
+	adb.envs = envs
 
 	adb._type = "ffs"
 	adb.code = USB_GADGET_FUNCTION_CODE_ADB
