@@ -26,7 +26,25 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/insomniacslk/dhcp/dhcpv4/server4"
+	"github.com/mdlayher/packet"
+	"golang.org/x/sys/unix"
 )
+
+// afPacketConn 用 AF_PACKET 建 UDP 封装连接,收发绕过 IP 协议栈:
+// 源 0.0.0.0 的广播帧会被 rp_filter 在 IP 层丢弃,UDP socket 收不到
+// (本机 veth 测试已证实:AF_PACKET 抓得到帧,绑 67 的 UDP socket 收不到),
+// AF_PACKET 不受影响。真实 DHCP 客户端(udhcpc)同样用 packet socket。
+func afPacketConn(ifname string, port int) (net.PacketConn, error) {
+	ifc, err := net.InterfaceByName(ifname)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := packet.Listen(ifc, packet.Datagram, unix.ETH_P_IP, nil)
+	if err != nil {
+		return nil, err
+	}
+	return nclient4.NewBroadcastUDPConn(raw, &net.UDPAddr{Port: port}), nil
+}
 
 const (
 	vethA = "dhcptest0" // server 端
@@ -69,7 +87,9 @@ func setupVeth() error {
 
 // poolIP 按 chaddr 末字节在 .100 基础上偏移,重复测试拿同一地址
 func poolIP(chaddr net.HardwareAddr) net.IP {
-	ip := append(net.IP(nil), poolBaseIP...)
+	// 先 To4() 转成 4 字节再改末字节:ParseIP 返回 16 字节 v4-mapped,
+	// 直接改 ip[3] 会破坏前缀区,To4() 将返回 nil 导致 writeIP panic
+	ip := append(net.IP(nil), poolBaseIP.To4()...)
 	if len(chaddr) >= 6 {
 		ip[3] += chaddr[5] % 100
 	}
@@ -148,6 +168,12 @@ func cmdServer() error {
 			Printfer: log.New(os.Stderr, "dhcp-test server: ", log.LstdFlags),
 		}))
 	}
+	// UDP socket 收不到 0.0.0.0 源广播(rp_filter),用 AF_PACKET 连接
+	conn, err := afPacketConn(*ifname, 67)
+	if err != nil {
+		return fmt.Errorf("create packet conn on %s: %w", *ifname, err)
+	}
+	opts = append(opts, server4.WithConn(conn))
 	server, err := server4.NewServer(*ifname, laddr, handler, opts...)
 	if err != nil {
 		return fmt.Errorf("create server on %s: %w", *ifname, err)
