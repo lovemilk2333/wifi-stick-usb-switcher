@@ -44,7 +44,8 @@ sudo ./dhcp-test server -i eth0 -v
 
 行为与 `enableClientMode` 一致:probe 前先把临时地址(默认
 `10.22.33.1/24`,即 daemon 的 `--rndis-ip`)加到接口,超时默认 3s
-(daemon 的 `--rndis-dhcp-timeout`),成功后打印 OFFER/ACK 及掩码、网关。
+(daemon 的 `--rndis-client-timeout` 总预算由 `-t` 控制,这里用固定 3s),
+成功后打印 OFFER/ACK 及掩码、网关。
 
 ```sh
 # 本机:对 veth client 端

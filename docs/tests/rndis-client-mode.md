@@ -4,6 +4,12 @@
 完整交换,观察上游分配的网段(掩码/网关),再手动配 IP 与默认路由 —— 与
 daemon 从模式的行为等价,但每一步手动,便于定位问题:
 
+> daemon 从模式现在直接复用本页的手动命令
+> `udhcpc -i usb0 -q -n -t 3 -T 2 -s <脚本>`(udhcpc 拿到租约即退出并
+> 发 DHCPRELEASE 终止租约,只取网段;insomniacslk/dhcp 的 nclient4 收不到
+> Windows ICS 的 Offer,已弃用)。daemon 侧探测受 `--rndis-client-timeout`
+> 总预算约束,本页手动执行不受限。
+
 - 手动 DHCP 客户端也拿不到租约 → 上游 DHCP 问题(如 Windows ICS 未开启),
   与 daemon 无关
 - 手动能拿到租约但 daemon 从模式回退 → daemon 侧问题,再查 daemon 日志

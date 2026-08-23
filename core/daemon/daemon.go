@@ -34,7 +34,6 @@ type DaemonCmd struct {
 	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
 	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP template (x.x.x.x, zero bytes take the upstream subnet bytes) of the stick in RNDIS client submode, e.g. 0.0.22.33"`
-	RndisDhcpTimeout     time.Duration    `arg:"--rndis-dhcp-timeout" default:"3s" help:"the DHCP probe timeout of the RNDIS client submode, such as 3s, 10s"`
 	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"5s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 5s, 30s"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
 	RndisSerialNumber    string           `arg:"--rndis-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the rndis usb gadget device"`
@@ -168,10 +167,6 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		return fmt.Errorf("`%s` is not a valid IPv4 address", cmd.RndisClientIP)
 	}
 
-	if cmd.RndisDhcpTimeout <= 0 {
-		return fmt.Errorf("`--rndis-dhcp-timeout` must be positive")
-	}
-
 	if cmd.RndisClientTimeout <= 0 {
 		return fmt.Errorf("`--rndis-client-timeout` must be positive")
 	}
@@ -229,7 +224,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- prepare modes ----------------------------------------------------
 
 	this.modes = []usb.UsbGadgetFunction{
-		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, rndisClientIP, cmd.RndisDhcpTimeout, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
+		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
 		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv),
 	}
 

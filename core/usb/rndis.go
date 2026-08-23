@@ -16,8 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 )
 
@@ -28,7 +26,6 @@ type UsbGadgetRndis struct {
 	connection_prefix string
 	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
 	client_timeout    time.Duration // 从模式总超时:等网卡出现 + DHCP 探测(--rndis-client-timeout)
-	dhcp_timeout      time.Duration // 单次 DHCP 探测超时(--rndis-dhcp-timeout)
 
 	dev_addr     string
 	host_addr    string
@@ -364,13 +361,13 @@ func (this *UsbGadgetRndis) probeUpstreamDhcpWithRetry(ifname string) (netip.Add
 		if attempt > 1 {
 			log.Printf("INFO: rndis dhcp retry %d\n", attempt)
 		}
-		subnet, router, err := this.probeUpstreamDhcp(ifname)
+		subnet, router, err := this.probeUpstreamDhcp(ifname, time.Until(deadline))
 		if err == nil {
 			return subnet, router, nil
 		}
 		lastErr = err
-		// 剩余预算不够再跑一轮完整探测(单轮超时 + 1s 重试间隔),放弃
-		if time.Until(deadline) <= this.dhcp_timeout+time.Second {
+		// 剩余预算不够再跑一轮 udhcpc(约 6s)+ 1s 间隔,放弃
+		if time.Until(deadline) <= 7*time.Second {
 			break
 		}
 		time.Sleep(time.Second)
@@ -391,35 +388,63 @@ func waitRndisCarrier(ifname string, timeout time.Duration) {
 	}
 }
 
-// probeUpstreamDhcp 用 dhcpv4 库做一次完整 DHCP 交换(Discover→Request),
-// 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端;
-// 排查询题可用 tools/dhcp-test 的 client -v 复刻。
-func (this *UsbGadgetRndis) probeUpstreamDhcp(ifname string) (netip.Addr, netip.Addr, error) {
-	client, err := nclient4.New(ifname, nclient4.WithTimeout(this.dhcp_timeout))
+// probeUpstreamDhcp 用系统 udhcpc 做一次完整 DHCP 交换:udhcpc -q 拿到
+// 租约即退出,-R 退出前发 DHCPRELEASE 终止租约 —— 只取网段,不持有
+// 地址。掩码/网关由回调脚本打到 stdout,daemon 捕获解析。insomniacslk
+// 库的 nclient4 收不到 Windows ICS 的 Offer(实测),udhcpc 手动成功过。
+func (this *UsbGadgetRndis) probeUpstreamDhcp(ifname string, timeout time.Duration) (netip.Addr, netip.Addr, error) {
+	script, err := this.udhcpcScript()
 	if err != nil {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("create dhcp client on %s: %w", ifname, err)
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("write udhcpc script: %w", err)
 	}
+	defer os.Remove(script)
 
-	ctx, cancel := context.WithTimeout(context.Background(), this.dhcp_timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	lease, err := client.Request(ctx, dhcpv4.WithRequestedOptions(dhcpv4.OptionSubnetMask, dhcpv4.OptionRouter))
+	args := []string{
+		"-i", ifname,
+		"-p", "/tmp/rndis-udhcpc-" + ifname + ".pid",
+		"-q", "-n", "-R", // 拿到租约即退出;退出前发 DHCPRELEASE
+		"-t", "3", "-T", "2", // 3 次尝试,间隔 2s(与手动调试命令一致)
+		"-s", script,
+	}
+	out, err := exec.CommandContext(ctx, "udhcpc", args...).CombinedOutput()
 	if err != nil {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp exchange on %s: %w", ifname, err)
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("udhcpc on %s: %v, output: %s", ifname, err, string(out))
 	}
 
-	ack := lease.ACK
-	maskBytes := ack.Options.Get(dhcpv4.OptionSubnetMask)
-	if len(maskBytes) != 4 {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp ack missing subnet mask")
+	var subnet, router net.IP
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "RNDIS_SUBNET="):
+			subnet = net.ParseIP(strings.TrimPrefix(line, "RNDIS_SUBNET="))
+		case strings.HasPrefix(line, "RNDIS_ROUTER="):
+			router = net.ParseIP(strings.TrimPrefix(line, "RNDIS_ROUTER="))
+		}
 	}
-	routerBytes := ack.Options.Get(dhcpv4.OptionRouter)
-	if len(routerBytes) < 4 {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp ack missing router")
+	if subnet == nil || router == nil {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("udhcpc got no subnet/router, output: %s", string(out))
 	}
+	return netip.AddrFrom4([4]byte(subnet.To4())), netip.AddrFrom4([4]byte(router.To4())), nil
+}
 
-	subnet := netip.AddrFrom4([4]byte(maskBytes))
-	router := netip.AddrFrom4([4]byte(routerBytes[:4]))
-	return subnet, router, nil
+// udhcpcScript 落盘 udhcpc 回调脚本:bound/renew 时把上游掩码/网关打到
+// stdout(daemon 从 CombinedOutput 捕获解析)。
+func (this *UsbGadgetRndis) udhcpcScript() (string, error) {
+	path := "/tmp/rndis-udhcpc-" + this.ifname + ".sh"
+	script := `#!/bin/sh
+# udhcpc 回调:bound/renew 时输出网段信息,daemon 捕获解析
+case "$1" in
+	bound|renew)
+		echo "RNDIS_SUBNET=$subnet"
+		echo "RNDIS_ROUTER=$router"
+		;;
+esac
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // maskToPrefix 把点分掩码(255.255.255.0)转成前缀长度;非连续掩码
@@ -666,13 +691,12 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, dhcp_timeout time.Duration, client_timeout time.Duration, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, client_timeout time.Duration, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
 	rndis.connection_prefix = connection_prefix
 	rndis.client_ip = client_ip
-	rndis.dhcp_timeout = dhcp_timeout
 	rndis.client_timeout = client_timeout
 	rndis.dev_addr = dev_addr
 	rndis.host_addr = host_addr
