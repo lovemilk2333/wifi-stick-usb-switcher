@@ -36,7 +36,6 @@ type DaemonCmd struct {
 	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP template (x.x.x.x, zero bytes take the upstream subnet bytes) of the stick in RNDIS client submode, e.g. 0.0.22.33"`
 	RndisDhcpTimeout     time.Duration    `arg:"--rndis-dhcp-timeout" default:"3s" help:"the DHCP probe timeout of the RNDIS client submode, such as 3s, 10s"`
 	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"5s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 5s, 30s"`
-	RndisDhcpDebug       bool             `arg:"--rndis-dhcp-debug" default:"false" help:"print DHCP packets of the RNDIS client submode probe, for debugging"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
 	RndisSerialNumber    string           `arg:"--rndis-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the rndis usb gadget device"`
 	RndisManufacturer    string           `arg:"--rndis-manufacturer" default:"wifi-stick" help:"the manufacturer string of the rndis usb gadget device"`
@@ -230,7 +229,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- prepare modes ----------------------------------------------------
 
 	this.modes = []usb.UsbGadgetFunction{
-		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, rndisClientIP, cmd.RndisDhcpTimeout, cmd.RndisClientTimeout, cmd.RndisDhcpDebug, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
+		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, rndisClientIP, cmd.RndisDhcpTimeout, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
 		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv),
 	}
 

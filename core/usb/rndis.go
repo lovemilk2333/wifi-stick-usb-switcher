@@ -29,7 +29,6 @@ type UsbGadgetRndis struct {
 	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
 	client_timeout    time.Duration // 从模式总超时:等网卡出现 + DHCP 探测(--rndis-client-timeout)
 	dhcp_timeout      time.Duration // 单次 DHCP 探测超时(--rndis-dhcp-timeout)
-	dhcp_debug        bool          // 打印 DHCP 包详情(--rndis-dhcp-debug)
 
 	dev_addr     string
 	host_addr    string
@@ -393,15 +392,10 @@ func waitRndisCarrier(ifname string, timeout time.Duration) {
 }
 
 // probeUpstreamDhcp 用 dhcpv4 库做一次完整 DHCP 交换(Discover→Request),
-// 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端。
-// dhcp_debug 开启时打印收发包详情(排查询题用,与 tools/dhcp-test 的
-// client -v 同一套 nclient4 日志)。
+// 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端;
+// 排查询题可用 tools/dhcp-test 的 client -v 复刻。
 func (this *UsbGadgetRndis) probeUpstreamDhcp(ifname string) (netip.Addr, netip.Addr, error) {
-	opts := []nclient4.ClientOpt{nclient4.WithTimeout(this.dhcp_timeout)}
-	if this.dhcp_debug {
-		opts = append(opts, nclient4.WithDebugLogger())
-	}
-	client, err := nclient4.New(ifname, opts...)
+	client, err := nclient4.New(ifname, nclient4.WithTimeout(this.dhcp_timeout))
 	if err != nil {
 		return netip.Addr{}, netip.Addr{}, fmt.Errorf("create dhcp client on %s: %w", ifname, err)
 	}
@@ -672,7 +666,7 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, dhcp_timeout time.Duration, client_timeout time.Duration, dhcp_debug bool, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, dhcp_timeout time.Duration, client_timeout time.Duration, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
@@ -680,7 +674,6 @@ func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr 
 	rndis.client_ip = client_ip
 	rndis.dhcp_timeout = dhcp_timeout
 	rndis.client_timeout = client_timeout
-	rndis.dhcp_debug = dhcp_debug
 	rndis.dev_addr = dev_addr
 	rndis.host_addr = host_addr
 	rndis.ifname = ifname
