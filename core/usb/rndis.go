@@ -1,6 +1,7 @@
 package usb
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -16,7 +17,7 @@ import (
 	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv4/client4"
+	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 )
 
@@ -25,8 +26,8 @@ import (
 type UsbGadgetRndis struct {
 	ip_addr           netip.Prefix
 	connection_prefix string
-	client_ip         netip.Addr       // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
-	dhcp_timeout      time.Duration    // 上游 DHCP 探测超时(--rndis-dhcp-timeout)
+	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
+	dhcp_timeout      time.Duration // 上游 DHCP 探测超时(--rndis-dhcp-timeout)
 
 	dev_addr     string
 	host_addr    string
@@ -260,10 +261,14 @@ func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string)
 		log.Printf("WARN: `ip link set %s up`: %v, output: %s\n", ifname, err, string(out))
 	}
 
-	if this.GetSubmode() >= 1 {
+	switch submode := this.GetSubmode(); submode {
+	case 0:
+		return this.enableGatewayMode(ifname)
+	case 1:
 		return this.enableClientMode(ifname)
+	default:
+		return fmt.Errorf("%s have no such submode: %d", this.instance, submode)
 	}
-	return this.enableGatewayMode(ifname)
 }
 
 // enableGatewayMode 主模式:usb0 配 --rndis-ip 作为网关,起 dnsmasq
@@ -336,21 +341,24 @@ func addIfaceAddr(ifname, ipSpec string) error {
 // 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端
 // (实测固件 Debian 11 无 udhcpc)。
 func probeUpstreamDhcp(ifname string, timeout time.Duration) (netip.Addr, netip.Addr, error) {
-	client := client4.NewClient()
-	client.ReadTimeout = timeout
-	conversation, err := client.Exchange(ifname, dhcpv4.WithRequestedOptions(dhcpv4.OptionSubnetMask, dhcpv4.OptionRouter))
+	client, err := nclient4.New(ifname, nclient4.WithTimeout(timeout))
+	if err != nil {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("create dhcp client on %s: %w", ifname, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	lease, err := client.Request(ctx, dhcpv4.WithRequestedOptions(dhcpv4.OptionSubnetMask, dhcpv4.OptionRouter))
 	if err != nil {
 		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp exchange on %s: %w", ifname, err)
 	}
 
-	// 交换成功时最后一个包是 ACK
-	packet := conversation[len(conversation)-1]
-
-	maskBytes := packet.Options.Get(dhcpv4.OptionSubnetMask)
+	ack := lease.ACK
+	maskBytes := ack.Options.Get(dhcpv4.OptionSubnetMask)
 	if len(maskBytes) != 4 {
 		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp ack missing subnet mask")
 	}
-	routerBytes := packet.Options.Get(dhcpv4.OptionRouter)
+	routerBytes := ack.Options.Get(dhcpv4.OptionRouter)
 	if len(routerBytes) < 4 {
 		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp ack missing router")
 	}

@@ -14,6 +14,9 @@ require (
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/alexflint/go-scalar v1.2.0 // indirect
+	github.com/josharian/native v1.1.0 // indirect
+	github.com/mdlayher/packet v1.1.2 // indirect
+	github.com/mdlayher/socket v0.4.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.29 // indirect
 	github.com/stretchr/testify v1.8.4 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
