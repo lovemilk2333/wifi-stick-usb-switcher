@@ -294,7 +294,7 @@ func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 		log.Printf("WARN: %v\n", err)
 	}
 
-	subnet, router, err := this.probeUpstreamDhcp(ifname)
+	subnet, router, err := this.probeUpstreamDhcpWithRetry(ifname)
 	if err != nil {
 		log.Printf("WARN: dhcp probe failed, fallback to gateway mode: %v\n", err)
 		return this.fallbackToGatewayMode()
@@ -347,6 +347,44 @@ func addIfaceAddr(ifname, ipSpec string) error {
 			return fmt.Errorf("`ip addr add %s dev %s`: %v, output: %s", ipSpec, ifname, err, string(out))
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// probeUpstreamDhcpWithRetry 等 RNDIS carrier 就绪后探测,失败每 5s 重试
+// 共 3 轮。切换 submode 时 gadget 重建,usb0 随 RNDIS 重新枚举 —— 立即
+// 探测收不到上游应答(实测:Windows 侧 RNDIS 网卡/ICS 需数秒才就绪,而
+// 手动 udhcpc 成功时接口早已稳定)。carrier up 只代表数据通道建立,ICS
+// 就绪靠重试覆盖。
+func (this *UsbGadgetRndis) probeUpstreamDhcpWithRetry(ifname string) (netip.Addr, netip.Addr, error) {
+	waitRndisCarrier(ifname, 5*time.Second)
+
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			log.Printf("INFO: rndis dhcp retry %d/3\n", attempt)
+		}
+		subnet, router, err := this.probeUpstreamDhcp(ifname)
+		if err == nil {
+			return subnet, router, nil
+		}
+		lastErr = err
+		if attempt < 3 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+	return netip.Addr{}, netip.Addr{}, lastErr
+}
+
+// waitRndisCarrier 等接口 carrier up(RNDIS 数据通道建立),超时返回。
+// carrier 文件不存在(接口刚重建/未注册)时按未就绪继续等。
+func waitRndisCarrier(ifname string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile("/sys/class/net/" + ifname + "/carrier")
+		if err == nil && strings.TrimSpace(string(data)) == "1" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
