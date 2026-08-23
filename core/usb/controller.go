@@ -77,6 +77,11 @@ type UsbGadgetFunction interface {
 	remove(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
 	enable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error
+
+	// submode 是主模式内部的子模式,仅内存状态;真正生效需要重新
+	// effect(applyFunction 重建 gadget 时 effect() 消费它)。
+	GetSubmode() int
+	SetSubmode(mode int)
 }
 
 type UsbGadgetFunctionBase struct {
@@ -84,6 +89,15 @@ type UsbGadgetFunctionBase struct {
 	_type    string
 	code     UsbGadgetFunctionCode
 	effected bool
+	submode  int
+}
+
+func (this *UsbGadgetFunctionBase) GetSubmode() int {
+	return this.submode
+}
+
+func (this *UsbGadgetFunctionBase) SetSubmode(mode int) {
+	this.submode = mode
 }
 
 func (this *UsbGadgetFunctionBase) getType() string {

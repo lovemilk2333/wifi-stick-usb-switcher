@@ -2,6 +2,7 @@ package led
 
 import (
 	"log"
+	"math"
 	"time"
 )
 
@@ -20,6 +21,16 @@ type LedInterpreter struct {
 	mode_action_index   LedModeActionIndex
 	mode_actions_length LedModeActionIndex
 	next_action_time    time.Time
+
+	loop_count int
+}
+
+func bool2uint(b bool) int {
+	if b {
+		return 1
+	} else {
+		return 0
+	}
 }
 
 func (this *LedInterpreter) setNextActionTime(t time.Time) {
@@ -60,6 +71,11 @@ func (this *LedInterpreter) act(now time.Time) error {
 
 	this.normalizeActionIndex()
 
+	this.loop_count += bool2uint(this.mode_action_index == 0)
+	if this.loop_count >= math.MaxInt/2 { // fix: `loop_count` overflow
+		this.loop_count = math.MaxInt / 4
+	}
+
 	err := applyAction(now, this.mode.actions[this.mode_action_index], this)
 	if err != nil {
 		return err
@@ -95,6 +111,7 @@ func (this *LedInterpreter) SetMode(mode *LedMode) error {
 	this.mode = mode
 	this.mode_actions_length = LedModeActionIndex(actions_length)
 	this.setNextActionTime(time.Time{}) // set to `0`
+	this.loop_count = -1                // the loop `0` will be added when the first act and `mode_action_index` is `0`
 
 	err := this.initMode()
 	if err != nil {
@@ -126,6 +143,14 @@ func (this *LedInterpreter) Tick() {
 	now := time.Now()
 
 	this.act(now)
+}
+
+func (this *LedInterpreter) GetLoopCount() int {
+	return this.loop_count
+}
+
+func (this *LedInterpreter) ResetLoopCount() {
+	this.loop_count = 0
 }
 
 func NewLedInterpreter(led *Led) *LedInterpreter {

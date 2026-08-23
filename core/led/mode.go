@@ -53,27 +53,27 @@ func (this *LedMode) Wait(duration time.Duration) *LedMode {
 }
 
 func (this *LedMode) Done() *LedMode {
-	actions_length := len(this.actions)
-	if actions_length == 0 {
-		return this
-	}
+	// actions_length := len(this.actions)
+	// if actions_length == 0 {
+	// 	return this
+	// }
 
-	first_non_wait_index := 0
-	for index, action := range this.actions {
-		if action.action != MODE_ACTION_WAIT {
-			first_non_wait_index = index
-			break
-		}
-	}
+	// first_non_wait_index := 0
+	// for index, action := range this.actions {
+	// 	if action.action != MODE_ACTION_WAIT {
+	// 		first_non_wait_index = index
+	// 		break
+	// 	}
+	// }
 
-	if first_non_wait_index <= 0 {
-		return this
-	}
+	// if first_non_wait_index <= 0 {
+	// 	return this
+	// }
 
-	new_actions := make([]*LedModeAction, 0, actions_length)
-	new_actions = append(new_actions, this.actions[first_non_wait_index:]...)
-	new_actions = append(new_actions, this.actions[:first_non_wait_index]...)
-	this.actions = new_actions
+	// new_actions := make([]*LedModeAction, 0, actions_length)
+	// new_actions = append(new_actions, this.actions[first_non_wait_index:]...)
+	// new_actions = append(new_actions, this.actions[:first_non_wait_index]...)
+	// this.actions = new_actions
 
 	return this
 }

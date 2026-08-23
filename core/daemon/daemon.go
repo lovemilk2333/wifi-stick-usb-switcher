@@ -27,6 +27,7 @@ type DaemonCmd struct {
 	Leds                 []string         `arg:"-l,--led,separate" help:"led path, such as /sys/class/leds/blue:wifi"`
 	LedBlinkDuration     time.Duration    `arg:"--led-blink-duration" help:"led blink duration, the light duration of led when blinking" default:"100ms"`
 	LedBlinkInterval     time.Duration    `arg:"--led-blink-interval" help:"led blink interval, the dark duration of led when blinking" default:"300ms"`
+	SubmodeLedDuration   time.Duration    `arg:"--submode-led-duration" help:"led off duration when entering submode selection, before showing the submode state" default:"750ms"`
 	UsbConfigFs          string           `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
 	GcPath               string           `arg:"-g,--gc-path" default:"gc" help:"gadget controller (https://github.com/HandsomeMod/gc) path or ELF name which can be found in $PATH"`
 	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
@@ -58,6 +59,25 @@ type Daemon struct {
 	tick_rate        time.Duration
 	daemonipc        *daemonipc.IPCFramework
 	daemonipc_config *ipc.ServerConfig
+
+	// submode selection state:长按进入选择模式后,短按切换 submode,
+	// 再长按退出。进入/退出选择时 LED 先关闭 submode_led_duration
+	// (submode_entry_mode)作为提示,loop_count 判断关闭期结束后显示
+	// submode 状态;effect 期间:模式切换快闪 LED_MODE_BLINK,
+	// 子模式切换关闭 LED。
+	// submode_entry_done 初始为 true:启动时(未进入/退出选择)不触发
+	// 关闭期检查,否则慢闪模式的 loop_count 增长会被误判为"关闭期
+	// 结束"而额外 SetMode 一次(闪烁相位跳变)。
+	submode_selection  bool
+	submode_entry_done bool
+	submode_entry_mode *led.LedMode
+}
+
+// LED_SUBMODE_MODES 是 submode 对应的 LED 显示模式,index = submode % 2:
+// 0 = 常亮,1 = 慢闪(1Hz,500ms on / 500ms off,暂固定周期)。
+var LED_SUBMODE_MODES = []*led.LedMode{
+	led.MODE_PRESET_ON,
+	led.NewLedMode().OnDuration(500 * time.Millisecond).Wait(500 * time.Millisecond).Done(),
 }
 
 func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
@@ -131,7 +151,17 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		return fmt.Errorf("`%s` is not a valid IP address", cmd.RndisIP)
 	}
 
+	// 初始 true:见 struct 注释 —— 启动时不要误触发关闭期检查
+	this.submode_entry_done = true
+
 	LED_MODE_BLINK = led.NewLedMode().OnDuration(cmd.LedBlinkDuration).Wait(cmd.LedBlinkInterval).Done()
+
+	// 进入/退出子模式选择时的过渡模式:LED 关闭 submode_led_duration 时间
+	// 作为提示,之后(loop_count >= 1,即 Off 已执行第二次)daemon 切换到
+	// submode 状态 LED。不用 OffDuration():其尾缀 On 会在关闭期结束后
+	// 先亮一个 tick、下一轮 Off 又灭,daemon 切 submode LED 时再亮 ——
+	// 表现为"闪两下"。Off().Wait(d) 让关闭期结束后直接切 submode 状态。
+	this.submode_entry_mode = led.NewLedMode().Off().Wait(cmd.SubmodeLedDuration).Done()
 
 	// ---- initialise input device ------------------------------------------
 
@@ -196,7 +226,16 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 func (this *Daemon) applyFunction() {
 	this.mode_changing = true
 
-	this.interpreters[this.current_mode].SetMode(LED_MODE_BLINK)
+	// effect 期间:模式切换用快闪,子模式切换(选择状态中短按)用关闭 LED
+	if this.submode_selection {
+		if interpreter := this.currentInterpreter(); interpreter != nil {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
+	} else {
+		if interpreter := this.currentInterpreter(); interpreter != nil {
+			interpreter.SetMode(LED_MODE_BLINK)
+		}
+	}
 
 	if errs := this.controller.ClearFunctions(); errs != nil {
 		log.Printf("WARN: cannot clear functions: %v\n", errs)
@@ -214,13 +253,38 @@ func (this *Daemon) applyFunction() {
 		log.Printf("WARN: cannot update gadget: %v\n", errs)
 	}
 
+	// 完成后按 submode 显示 LED:0 常亮 / 1 慢闪(submode % 2 取 index)
 	if !this.turn_off_leds {
-		this.interpreters[this.current_mode].SetMode(led.MODE_PRESET_ON)
+		if interpreter := this.currentInterpreter(); interpreter != nil {
+			interpreter.SetMode(this.submodeLedMode())
+		}
 	} else {
-		this.interpreters[this.current_mode].SetMode(led.MODE_PRESET_OFF)
+		if interpreter := this.currentInterpreter(); interpreter != nil {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
 	}
 
 	this.mode_changing = false
+}
+
+// submodeLedMode 返回当前主模式 submode 对应的 LED 模式。
+// submode 超出 1 用 % 2 取 index(0 -> 常亮,1 -> 慢闪)。
+func (this *Daemon) submodeLedMode() *led.LedMode {
+	submode := this.modes[this.current_mode].GetSubmode()
+	index := submode % 2
+	if index < 0 { // SetSubmode 只递增,防御负数
+		index += 2
+	}
+	return LED_SUBMODE_MODES[index]
+}
+
+// currentInterpreter 返回当前主模式对应的 LED interpreter。
+// 可能为 nil:LED 数量少于主模式数量,或该 LED 初始化失败。
+func (this *Daemon) currentInterpreter() *led.LedInterpreter {
+	if this.current_mode < 0 || this.current_mode >= len(this.interpreters) {
+		return nil
+	}
+	return this.interpreters[this.current_mode]
 }
 
 func (this *Daemon) Tick() {
@@ -234,20 +298,38 @@ func (this *Daemon) Tick() {
 
 		switch event.Type {
 		case input.INPUT_TAP:
-			this.current_mode++
-			this.current_mode %= len(this.modes)
-			this.mode_changed = true
-		case input.INPUT_LONG_TAP:
-			this.current_mode--
-			this.current_mode %= len(this.modes)
-			if this.current_mode < 0 {
-				this.current_mode += len(this.modes)
+			if this.submode_selection {
+				// 子模式选择状态:短按切换 submode(0→1→2...,LED 用 % 2 显示)
+				mode := this.modes[this.current_mode]
+				mode.SetSubmode(mode.GetSubmode() + 1)
+				this.mode_changed = true
+			} else {
+				this.current_mode++
+				this.current_mode %= len(this.modes)
+				this.mode_changed = true
 			}
-			this.mode_changed = true
+		case input.INPUT_LONG_TAP:
+			// 进入/退出子模式选择:LED 先关闭 submode_led_duration 作为提示,
+			// 关闭期结束后(loop_count >= 1)显示 submode 状态
+			this.submode_selection = !this.submode_selection
+			this.submode_entry_done = false
+			if interpreter := this.currentInterpreter(); interpreter != nil {
+				interpreter.SetMode(this.submode_entry_mode)
+			}
 		case input.INPUT_MULTIPLE_TAP:
 			// TODO
 		case input.INPUT_ERROR:
 			// TODO WARNING
+		}
+	}
+
+	// 进入/退出子模式选择的 LED 关闭期结束后显示 submode 状态。
+	// loop_count >= 1 表示 submode_entry_mode(Off→Wait(duration)→On)
+	// 已完成一轮,即关闭了 submode_led_duration 时间。
+	if !this.submode_entry_done {
+		if interpreter := this.currentInterpreter(); interpreter != nil && interpreter.GetLoopCount() >= 1 {
+			this.submode_entry_done = true
+			interpreter.SetMode(this.submodeLedMode())
 		}
 	}
 
