@@ -27,7 +27,8 @@ type UsbGadgetRndis struct {
 	ip_addr           netip.Prefix
 	connection_prefix string
 	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
-	dhcp_timeout      time.Duration // 上游 DHCP 探测超时(--rndis-dhcp-timeout)
+	client_timeout    time.Duration // 从模式总超时:等网卡出现 + DHCP 探测(--rndis-client-timeout)
+	dhcp_timeout      time.Duration // 单次 DHCP 探测超时(--rndis-dhcp-timeout)
 	dhcp_debug        bool          // 打印 DHCP 包详情(--rndis-dhcp-debug)
 
 	dev_addr     string
@@ -350,33 +351,36 @@ func addIfaceAddr(ifname, ipSpec string) error {
 	}
 }
 
-// probeUpstreamDhcpWithRetry 等 RNDIS carrier 就绪后探测,失败每 5s 重试
-// 共 3 轮。切换 submode 时 gadget 重建,usb0 随 RNDIS 重新枚举 —— 立即
-// 探测收不到上游应答(实测:Windows 侧 RNDIS 网卡/ICS 需数秒才就绪,而
-// 手动 udhcpc 成功时接口早已稳定)。carrier up 只代表数据通道建立,ICS
-// 就绪靠重试覆盖。
+// probeUpstreamDhcpWithRetry 在 client_timeout 总预算内等 RNDIS 网卡
+// 出现并探测。切换 submode 时 gadget 重建,usb0 随 RNDIS 重新枚举,
+// 网卡未出现时第一轮探测必然失败(实测),所以先等 carrier up(carrier
+// up 只代表数据通道建立,Windows 侧 ICS 可能仍在就绪);剩余预算内
+// 失败重试,耗尽回退,由 enableClientMode 处理。
 func (this *UsbGadgetRndis) probeUpstreamDhcpWithRetry(ifname string) (netip.Addr, netip.Addr, error) {
-	waitRndisCarrier(ifname, 5*time.Second)
+	deadline := time.Now().Add(this.client_timeout)
+	waitRndisCarrier(ifname, time.Until(deadline))
 
 	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
+	for attempt := 1; ; attempt++ {
 		if attempt > 1 {
-			log.Printf("INFO: rndis dhcp retry %d/3\n", attempt)
+			log.Printf("INFO: rndis dhcp retry %d\n", attempt)
 		}
 		subnet, router, err := this.probeUpstreamDhcp(ifname)
 		if err == nil {
 			return subnet, router, nil
 		}
 		lastErr = err
-		if attempt < 3 {
-			time.Sleep(5 * time.Second)
+		// 剩余预算不够再跑一轮完整探测(单轮超时 + 1s 重试间隔),放弃
+		if time.Until(deadline) <= this.dhcp_timeout+time.Second {
+			break
 		}
+		time.Sleep(time.Second)
 	}
 	return netip.Addr{}, netip.Addr{}, lastErr
 }
 
-// waitRndisCarrier 等接口 carrier up(RNDIS 数据通道建立),超时返回。
-// carrier 文件不存在(接口刚重建/未注册)时按未就绪继续等。
+// waitRndisCarrier 等接口出现且 carrier up(RNDIS 数据通道建立)。
+// carrier 文件不存在(接口未出现/刚重建)时按未就绪继续等。
 func waitRndisCarrier(ifname string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -668,13 +672,14 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, dhcp_timeout time.Duration, dhcp_debug bool, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, dhcp_timeout time.Duration, client_timeout time.Duration, dhcp_debug bool, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
 	rndis.connection_prefix = connection_prefix
 	rndis.client_ip = client_ip
 	rndis.dhcp_timeout = dhcp_timeout
+	rndis.client_timeout = client_timeout
 	rndis.dhcp_debug = dhcp_debug
 	rndis.dev_addr = dev_addr
 	rndis.host_addr = host_addr
