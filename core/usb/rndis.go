@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv4/client4"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 )
 
@@ -329,68 +331,32 @@ func addIfaceAddr(ifname, ipSpec string) error {
 	}
 }
 
-// udhcpc 回调脚本:把上游 DHCP 的掩码/网关落盘。不用默认脚本 ——
-// 默认脚本会把 DHCP 分配的地址直接配到接口上,而 usb0 的地址要按
-// --rndis-client-ip 规则计算,不是 DHCP 分配的那个。
-const (
-	dhcpScriptFile = "/tmp/" + base.PROJECT_IDENT + "-udhcpc.script"
-	dhcpSubnetFile = "/tmp/" + base.PROJECT_IDENT + "-dhcp-subnet"
-	dhcpRouterFile = "/tmp/" + base.PROJECT_IDENT + "-dhcp-router"
-)
-
-const udhcpcScript = `#!/bin/sh
-case "$1" in
-    bound|renew)
-        echo "$subnet" > ` + dhcpSubnetFile + `
-        echo "$router" > ` + dhcpRouterFile + `
-        ;;
-esac
-`
-
-// probeUpstreamDhcp 跑一次 udhcpc(-q 拿到租约即退)探测上游 DHCP,
-// 从回调脚本落盘的文件读回掩码与网关。拿不到租约返回错误。
+// probeUpstreamDhcp 用 dhcpv4 库做一次完整 DHCP 交换(Discover→Request),
+// 从 ACK 解析上游子网掩码与网关。库内实现,不依赖系统 DHCP 客户端
+// (实测固件 Debian 11 无 udhcpc)。
 func probeUpstreamDhcp(ifname string) (netip.Addr, netip.Addr, error) {
-	if err := os.WriteFile(dhcpScriptFile, []byte(udhcpcScript), 0755); err != nil {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("write %s: %w", dhcpScriptFile, err)
-	}
-	_ = os.Remove(dhcpSubnetFile)
-	_ = os.Remove(dhcpRouterFile)
-
-	out, err := exec.Command("udhcpc", "-i", ifname, "-s", dhcpScriptFile, "-q", "-n", "-t", "3", "-T", "2", "-A", "2").CombinedOutput()
+	client := client4.NewClient()
+	client.ReadTimeout = 10 * time.Second
+	conversation, err := client.Exchange(ifname, dhcpv4.WithRequestedOptions(dhcpv4.OptionSubnetMask, dhcpv4.OptionRouter))
 	if err != nil {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("udhcpc: %w, output: %s", err, string(out))
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp exchange on %s: %w", ifname, err)
 	}
 
-	subnet, err := parseAddrFile(dhcpSubnetFile)
-	if err != nil {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("read %s: %w", dhcpSubnetFile, err)
+	// 交换成功时最后一个包是 ACK
+	packet := conversation[len(conversation)-1]
+
+	maskBytes := packet.Options.Get(dhcpv4.OptionSubnetMask)
+	if len(maskBytes) != 4 {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp ack missing subnet mask")
 	}
-	router, err := parseAddrFile(dhcpRouterFile)
-	if err != nil {
-		return netip.Addr{}, netip.Addr{}, fmt.Errorf("read %s: %w", dhcpRouterFile, err)
+	routerBytes := packet.Options.Get(dhcpv4.OptionRouter)
+	if len(routerBytes) < 4 {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("dhcp ack missing router")
 	}
+
+	subnet := netip.AddrFrom4([4]byte(maskBytes))
+	router := netip.AddrFrom4([4]byte(routerBytes[:4]))
 	return subnet, router, nil
-}
-
-// parseAddrFile 读取文件中的 IPv4 地址。DHCP 网关可能是空格分隔的
-// 多个,取第一个。
-func parseAddrFile(path string) (netip.Addr, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return netip.Addr{}, err
-	}
-	s := strings.TrimSpace(string(data))
-	if i := strings.IndexByte(s, ' '); i > 0 {
-		s = s[:i]
-	}
-	addr, err := netip.ParseAddr(s)
-	if err != nil {
-		return netip.Addr{}, err
-	}
-	if !addr.Is4() {
-		return netip.Addr{}, fmt.Errorf("%s: not an IPv4 address", path)
-	}
-	return addr, nil
 }
 
 // maskToPrefix 把点分掩码(255.255.255.0)转成前缀长度;非连续掩码
