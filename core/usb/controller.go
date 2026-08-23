@@ -847,6 +847,14 @@ func (this *UsbGadgetController) GetFunctions() map[string]UsbGadgetFunction {
 	return this.current_functions
 }
 
+// ReconfigureFunction 不重建 gadget,直接在当前接口上重新执行函数的
+// enable 配置(如 RNDIS submode 切换)。重建 gadget 会断开 USB 对端的
+// RNDIS 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测才老失败),
+// submode 切换时函数不变,网卡连接保持,只需重配网络。
+func (this *UsbGadgetController) ReconfigureFunction(function UsbGadgetFunction) error {
+	return function.enable(this.gadget, this.gc)
+}
+
 /*
 replace function which `getType()` matched in `this.target_functions`, the action as same as `AddFunction()` if not found and `replace_only` is not true
 

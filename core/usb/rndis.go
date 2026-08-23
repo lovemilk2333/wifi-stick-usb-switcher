@@ -272,6 +272,14 @@ func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string)
 // enableGatewayMode 主模式:usb0 配 --rndis-ip 作为网关,起 dnsmasq
 // 供 USB host 获取地址。
 func (this *UsbGadgetRndis) enableGatewayMode(ifname string) error {
+	// submode 直切(不重建 gadget)时接口还带着从模式的地址/路由,先清掉;
+	// 完整重建后接口是干净的,flush 无操作
+	if out, err := exec.Command("ip", "route", "flush", "dev", ifname).CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip route flush dev %s`: %v, output: %s\n", ifname, err, string(out))
+	}
+	if out, err := exec.Command("ip", "addr", "flush", "dev", ifname).CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip addr flush dev %s`: %v, output: %s\n", ifname, err, string(out))
+	}
 	if err := addIfaceAddr(ifname, this.ip_addr.String()); err != nil {
 		log.Printf("WARN: %v\n", err)
 	}
@@ -284,6 +292,11 @@ func (this *UsbGadgetRndis) enableGatewayMode(ifname string) error {
 // 与物理网卡 DHCP 接管一致。探测失败/掩码非连续/prefix >= /30(分
 // 不出可用地址)时直接跳回 submode 0 走主模式,保证 stick 始终可达。
 func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
+	// submode 直切(不重建 gadget)时主模式的 dnsmasq 还在接口上跑,
+	// 从模式是 DHCP 客户端,先停掉本机 DHCP 服务器(幂等,完整重建
+	// 路径已在 effect 里停过)
+	stopDnsmasqAll()
+
 	// 探测前先配临时地址:实测 usb0 无 IPv4 地址时收不到上游 DHCP 应答
 	// (手动 udhcpc 成功时 usb0 都带着地址)。失败回退主模式时这个地址
 	// 正好就是 --rndis-ip,不用额外处理。

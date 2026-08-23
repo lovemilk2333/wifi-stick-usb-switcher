@@ -58,6 +58,10 @@ type Daemon struct {
 	current_mode     int
 	mode_changed     bool
 	mode_changing    bool
+	// submode 选择中的切换(submode_changed):函数不变,applyFunction
+	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
+	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
+	submode_changed bool
 	turn_off_leds    bool
 	tick_rate        time.Duration
 	daemonipc        *daemonipc.IPCFramework
@@ -245,6 +249,29 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 func (this *Daemon) applyFunction() {
 	this.mode_changing = true
 
+	// submode 切换:函数不变,不重建 gadget(重建会断开对端 RNDIS 网卡,
+	// ICS 需重新就绪,第一次探测必然失败)—— 直接在当前接口上重配网络
+	if this.submode_changed {
+		this.submode_changed = false
+		if interpreter := this.currentInterpreter(); interpreter != nil {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
+		if err := this.controller.ReconfigureFunction(this.modes[this.current_mode]); err != nil {
+			log.Printf("WARN: cannot reconfigure function: %v\n", err)
+		}
+		if !this.turn_off_leds {
+			if interpreter := this.currentInterpreter(); interpreter != nil {
+				interpreter.SetMode(this.submodeLedMode())
+			}
+		} else {
+			if interpreter := this.currentInterpreter(); interpreter != nil {
+				interpreter.SetMode(led.MODE_PRESET_OFF)
+			}
+		}
+		this.mode_changing = false
+		return
+	}
+
 	// effect 期间:模式切换用快闪,子模式切换(选择状态中短按)用关闭 LED
 	if this.submode_selection {
 		if interpreter := this.currentInterpreter(); interpreter != nil {
@@ -322,10 +349,12 @@ func (this *Daemon) Tick() {
 				mode := this.modes[this.current_mode]
 				mode.SetSubmode(mode.GetSubmode() + 1)
 				this.mode_changed = true
+				this.submode_changed = true
 			} else {
 				this.current_mode++
 				this.current_mode %= len(this.modes)
 				this.mode_changed = true
+				this.submode_changed = false
 			}
 		case input.INPUT_LONG_TAP:
 			// 进入/退出子模式选择:LED 先关闭 submode_led_duration 作为提示,
