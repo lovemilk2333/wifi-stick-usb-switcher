@@ -1,7 +1,7 @@
 package daemonipc
 
 import (
-	"reflect"
+	"fmt"
 )
 
 type daemonInterface interface {
@@ -10,14 +10,46 @@ type daemonInterface interface {
 }
 
 func InitServer(daemon daemonInterface) *IPCFramework {
-	fw := NewIPCFramework()
+	IPCServer := NewIPCFramework()
 
-	fw.RegisterHandler(
+	IPCServer.SetFallbackHandler(func(this *IPCFramework, status IPCHandlerStatus, err error, package_type IPCPackageType, data []byte) (*IPCPackage, error) {
+		switch status {
+		case HANDLER_STATUS_PAYLOAD_STRUCT_NOT_FOUND:
+			return &IPCPackage{
+				Type: PACKAGE_INTERNAL_SERVER_ERROR,
+				Payload: []any{
+					fmt.Sprintf("no such payload struct for package `%d`, payload: %s", package_type, data),
+				},
+			}, nil
+		case HANDLER_STATUS_INVALID_HANDLER, HANDLER_STATUS_INVALID_HANDLER_RESULT:
+			return &IPCPackage{
+				Type: PACKAGE_INTERNAL_SERVER_ERROR,
+				Payload: []any{
+					fmt.Sprintf("invalid handler (or its result) for package `%d`, payload: %s", package_type, data),
+				},
+			}, nil
+		case HANDLER_STATUS_INVALID_PAYLOAD:
+			// TODO resp the data struct package
+			return &IPCPackage{
+				Type: PACKAGE_INVALID_PAYLOAD,
+				Payload: []any{
+					err.Error(),
+				},
+			}, nil
+		default:
+			return &IPCPackage{
+				Type: PACKAGE_INTERNAL_SERVER_ERROR,
+				Payload: []any{
+					fmt.Sprintf("cannot handle error because of unexpected IPC handler status `%d`: %v", status, err),
+				},
+			}, nil
+		}
+	})
+
+	IPCServer.RegisterHandler(
 		PACKAGE_TOGGLE_LED,
-		reflect.TypeFor[ToggleLEDPayload](),
-		func(this *IPCFramework, payload any) (*IPCPackage, error) {
-			data := payload.(*ToggleLEDPayload)
-			switch data.Target {
+		func(this *IPCFramework, target ToggleLEDTarget) (*IPCPackage, error) {
+			switch target {
 			case TOGGLE_LED_NONE: // resp current led state
 				break
 			case TOGGLE_LED_OFF:
@@ -28,12 +60,12 @@ func InitServer(daemon daemonInterface) *IPCFramework {
 
 			return &IPCPackage{
 				Type: PACKAGE_TOGGLE_LED_RESP,
-				Payload: &ToggleLEDResp{
-					Off: daemon.GetTurnOffLeds(),
+				Payload: []any{ // Off or not
+					daemon.GetTurnOffLeds(),
 				},
 			}, nil
 		},
 	)
 
-	return fw
+	return IPCServer
 }

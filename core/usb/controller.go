@@ -222,8 +222,6 @@ func (this *UsbGadgetController) checkGc() error {
 	return nil
 }
 
-const RNDIS_USE_GADGET_FUNCTION = "rndis"
-
 func (this *UsbGadgetController) resetFunctions(targets bool) {
 	this.current_functions = make(map[string]UsbGadgetFunction)
 	if targets {
@@ -536,7 +534,7 @@ func (this *UsbGadgetController) updateGadget() []error {
 		// strings 为空时把解析容错得到的垃圾 key 写进不存在的路径
 		// (如 strings/0x409/serial → EACCES)。字符串由各函数的 effect()
 		// 显式写入。
-		this.gadget.setLanguage(language)
+		// this.gadget.setLanguage(language)
 	}
 
 	if len(state) == 0 {
@@ -865,11 +863,6 @@ func (this *UsbGadgetController) ReplaceFunction(function UsbGadgetFunction, rep
 		} else {
 			return this.AddFunction(function)
 		}
-	}
-
-	if function.getType() == RNDIS_USE_GADGET_FUNCTION {
-		// NOTE: don't check rndis ifname here — the network interface doesn't exist
-		// until the gadget is enabled. Validation happens at effect time.
 	}
 
 	this.target_functions[target_key] = function

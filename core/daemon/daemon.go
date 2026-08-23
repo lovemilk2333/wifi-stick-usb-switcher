@@ -1,4 +1,4 @@
-package core
+package daemon
 
 import (
 	"fmt"
@@ -79,7 +79,8 @@ func (this *Daemon) SetTurnOffLeds(off bool) {
 
 // Mainloop runs the daemon event loop at the configured tick rate.
 func (this *Daemon) Mainloop() error {
-	// TODO
+	// TODO impl IPC
+
 	// ipc_server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
 	// if err != nil {
 	// 	return err
