@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math/bits"
 	"net"
 	"net/netip"
 	"os"
@@ -22,6 +23,7 @@ import (
 type UsbGadgetRndis struct {
 	ip_addr           netip.Prefix
 	connection_prefix string
+	client_ip         netip.Addr // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
 
 	dev_addr     string
 	host_addr    string
@@ -223,8 +225,10 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 }
 
 // enable 在 gadget 绑定(enableGadget)之后调用 — 此时内核才创建 usb0
-// 接口。RNDIS 自己管理网络:让 NM 让开、配置 IP、启动 dnsmasq 供 USB
-// host 获取地址。
+// 接口。RNDIS 自己管理网络:让 NM 让开、接口 up,然后按 submode 分派:
+// 0(网关模式)配 --rndis-ip 并起 dnsmasq;1(从模式)从上游 DHCP 拿
+// 网段配客户端 IP 与默认路由。接口每次随 gadget 重建都是干净的,切换
+// submode 无需清地址/路由。
 func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
 	ifname := this.ifname
 
@@ -253,25 +257,170 @@ func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string)
 		log.Printf("WARN: `ip link set %s up`: %v, output: %s\n", ifname, err, string(out))
 	}
 
-	ipSpec := this.ip_addr.String()
+	if this.GetSubmode() >= 1 {
+		return this.enableClientMode(ifname)
+	}
+	return this.enableGatewayMode(ifname)
+}
+
+// enableGatewayMode 主模式:usb0 配 --rndis-ip 作为网关,起 dnsmasq
+// 供 USB host 获取地址。
+func (this *UsbGadgetRndis) enableGatewayMode(ifname string) error {
+	if err := addIfaceAddr(ifname, this.ip_addr.String()); err != nil {
+		log.Printf("WARN: %v\n", err)
+	}
+	this.startDnsmasq()
+	return nil
+}
+
+// enableClientMode 从模式:udhcpc 一次性从上游 DHCP 拿网段,usb0 配
+// 客户端 IP(--rndis-client-ip 规则),默认路由 via 上游网关 —— 行为
+// 与物理网卡 DHCP 接管一致。探测失败/掩码非连续/prefix >= /30(分
+// 不出可用地址)时直接跳回 submode 0 走主模式,保证 stick 始终可达。
+func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
+	subnet, router, err := probeUpstreamDhcp(ifname)
+	if err != nil {
+		log.Printf("WARN: dhcp probe failed, fallback to gateway mode: %v\n", err)
+		return this.fallbackToGatewayMode()
+	}
+	prefix, ok := maskToPrefix(subnet)
+	if !ok {
+		log.Printf("WARN: non-contiguous subnet mask %s, fallback to gateway mode\n", subnet)
+		return this.fallbackToGatewayMode()
+	}
+	if prefix >= 30 { // /30 只有 2 个可用地址,没有分配给客户端的余量
+		log.Printf("WARN: upstream prefix /%d too small, fallback to gateway mode\n", prefix)
+		return this.fallbackToGatewayMode()
+	}
+
+	network := netip.PrefixFrom(router, prefix).Masked().Addr()
+	ip := calcClientIP(network, prefix, this.client_ip)
+	ipSpec := fmt.Sprintf("%s/%d", ip, prefix)
+	if err := addIfaceAddr(ifname, ipSpec); err != nil {
+		log.Printf("WARN: %v, fallback to gateway mode\n", err)
+		return this.fallbackToGatewayMode()
+	}
+	if out, err := exec.Command("ip", "route", "add", "default", "via", router.String(), "dev", ifname).CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip route add default via %s dev %s`: %v, output: %s\n", router, ifname, err, string(out))
+	}
+	log.Printf("INFO: rndis client mode: %s, gateway %s\n", ipSpec, router)
+	return nil
+}
+
+// fallbackToGatewayMode 从模式回退:submode 直接跳回 0(回退后 LED 显示
+// 与后续 effect 都回到主模式),再走主模式逻辑。
+func (this *UsbGadgetRndis) fallbackToGatewayMode() error {
+	this.SetSubmode(0)
+	return this.enableGatewayMode(this.ifname)
+}
+
+// addIfaceAddr 给接口配地址,3 次重试后放弃;地址已存在(重复 apply)
+// 不算错误。
+func addIfaceAddr(ifname, ipSpec string) error {
 	for attempt := 1; ; attempt++ {
 		out, err := exec.Command("ip", "addr", "add", ipSpec, "dev", ifname).CombinedOutput()
-		if err == nil {
-			break
-		}
-		// 地址已存在(重复 apply)不算错误
-		if hasIfaceAddr(ifname, ipSpec) {
-			break
+		if err == nil || hasIfaceAddr(ifname, ipSpec) {
+			return nil
 		}
 		if attempt >= 3 {
-			log.Printf("WARN: `ip addr add %s dev %s`: %v, output: %s\n", ipSpec, ifname, err, string(out))
-			break
+			return fmt.Errorf("`ip addr add %s dev %s`: %v, output: %s", ipSpec, ifname, err, string(out))
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
 
-	this.startDnsmasq()
-	return nil
+// udhcpc 回调脚本:把上游 DHCP 的掩码/网关落盘。不用默认脚本 ——
+// 默认脚本会把 DHCP 分配的地址直接配到接口上,而 usb0 的地址要按
+// --rndis-client-ip 规则计算,不是 DHCP 分配的那个。
+const (
+	dhcpScriptFile = "/tmp/" + base.PROJECT_IDENT + "-udhcpc.script"
+	dhcpSubnetFile = "/tmp/" + base.PROJECT_IDENT + "-dhcp-subnet"
+	dhcpRouterFile = "/tmp/" + base.PROJECT_IDENT + "-dhcp-router"
+)
+
+const udhcpcScript = `#!/bin/sh
+case "$1" in
+    bound|renew)
+        echo "$subnet" > ` + dhcpSubnetFile + `
+        echo "$router" > ` + dhcpRouterFile + `
+        ;;
+esac
+`
+
+// probeUpstreamDhcp 跑一次 udhcpc(-q 拿到租约即退)探测上游 DHCP,
+// 从回调脚本落盘的文件读回掩码与网关。拿不到租约返回错误。
+func probeUpstreamDhcp(ifname string) (netip.Addr, netip.Addr, error) {
+	if err := os.WriteFile(dhcpScriptFile, []byte(udhcpcScript), 0755); err != nil {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("write %s: %w", dhcpScriptFile, err)
+	}
+	_ = os.Remove(dhcpSubnetFile)
+	_ = os.Remove(dhcpRouterFile)
+
+	out, err := exec.Command("udhcpc", "-i", ifname, "-s", dhcpScriptFile, "-q", "-n", "-t", "3", "-T", "2", "-A", "2").CombinedOutput()
+	if err != nil {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("udhcpc: %w, output: %s", err, string(out))
+	}
+
+	subnet, err := parseAddrFile(dhcpSubnetFile)
+	if err != nil {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("read %s: %w", dhcpSubnetFile, err)
+	}
+	router, err := parseAddrFile(dhcpRouterFile)
+	if err != nil {
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("read %s: %w", dhcpRouterFile, err)
+	}
+	return subnet, router, nil
+}
+
+// parseAddrFile 读取文件中的 IPv4 地址。DHCP 网关可能是空格分隔的
+// 多个,取第一个。
+func parseAddrFile(path string) (netip.Addr, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	s := strings.TrimSpace(string(data))
+	if i := strings.IndexByte(s, ' '); i > 0 {
+		s = s[:i]
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if !addr.Is4() {
+		return netip.Addr{}, fmt.Errorf("%s: not an IPv4 address", path)
+	}
+	return addr, nil
+}
+
+// maskToPrefix 把点分掩码(255.255.255.0)转成前缀长度;非连续掩码
+// 返回 false。
+func maskToPrefix(mask netip.Addr) (int, bool) {
+	a := mask.As4()
+	m := binary.BigEndian.Uint32(a[:])
+	prefix := bits.OnesCount32(m)
+	if uint32(0xffffffff)<<(32-prefix) != m {
+		return 0, false
+	}
+	return prefix, true
+}
+
+// calcClientIP 计算从模式 usb0 的 IP:掩码对齐 8bit 时,取上游网络
+// 前缀字节 + client_ip 的后缀字节(0 字节表示取上游字节),例如
+// /24 + 0.0.22.33 → 192.168.137.33;/16 + 0.0.22.33 → 192.168.22.33;
+// 不对齐 8bit(如 /29)时取广播地址 - 2。prefix >= 30 由调用方回退。
+func calcClientIP(network netip.Addr, prefix int, client_ip netip.Addr) netip.Addr {
+	if prefix%8 != 0 {
+		broadcast, _ := subnetLast(netip.PrefixFrom(network, prefix))
+		return broadcast.Prev().Prev()
+	}
+
+	n := network.As4()
+	c := client_ip.As4()
+	for i := prefix / 8; i < 4; i++ {
+		n[i] = c[i]
+	}
+	return netip.AddrFrom4(n)
 }
 
 // hasIfaceAddr 检查接口上是否已有指定地址(如 `10.22.33.1/24`)。
@@ -488,11 +637,12 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
 	rndis.connection_prefix = connection_prefix
+	rndis.client_ip = client_ip
 	rndis.dev_addr = dev_addr
 	rndis.host_addr = host_addr
 	rndis.ifname = ifname

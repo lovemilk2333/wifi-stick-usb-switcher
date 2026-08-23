@@ -33,6 +33,7 @@ type DaemonCmd struct {
 	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
 	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
+	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP template (x.x.x.x, zero bytes take the upstream subnet bytes) of the stick in RNDIS client submode, e.g. 0.0.22.33"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
 	RndisSerialNumber    string           `arg:"--rndis-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the rndis usb gadget device"`
 	RndisManufacturer    string           `arg:"--rndis-manufacturer" default:"wifi-stick" help:"the manufacturer string of the rndis usb gadget device"`
@@ -112,6 +113,14 @@ func (this *Daemon) Mainloop() error {
 	// 	return err
 	// }
 
+	log.Printf("INFO daemon LED init\n")
+	for _, interpreter := range this.interpreters {
+		interpreter.SetMode(led.MODE_PRESET_ON)
+		interpreter.Tick()
+		time.Sleep(time.Millisecond * 500)
+		interpreter.SetMode(led.MODE_PRESET_OFF)
+	}
+
 	ticker := time.NewTicker(this.tick_rate)
 	defer ticker.Stop()
 
@@ -150,6 +159,11 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	rndisIP, err := netip.ParsePrefix(cmd.RndisIP)
 	if err != nil {
 		return fmt.Errorf("`%s` is not a valid IP address", cmd.RndisIP)
+	}
+
+	rndisClientIP, err := netip.ParseAddr(cmd.RndisClientIP)
+	if err != nil || !rndisClientIP.Is4() {
+		return fmt.Errorf("`%s` is not a valid IPv4 address", cmd.RndisClientIP)
 	}
 
 	// 初始 true:见 struct 注释 —— 启动时不要误触发关闭期检查
@@ -205,20 +219,13 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- prepare modes ----------------------------------------------------
 
 	this.modes = []usb.UsbGadgetFunction{
-		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
+		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, rndisClientIP, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
 		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv),
 	}
 
 	// ---- initialise LEDs --------------------------------------------------
 
 	this.interpreters = loadLedInterpreters(cmd.Leds)
-
-	for _, interpreter := range this.interpreters {
-		interpreter.SetMode(led.MODE_PRESET_ON)
-		interpreter.Tick()
-		time.Sleep(time.Millisecond * 500)
-		interpreter.SetMode(led.MODE_PRESET_OFF)
-	}
 
 	// ---- init ipc
 	// TODO
