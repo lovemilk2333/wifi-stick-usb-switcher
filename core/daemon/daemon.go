@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"strconv"
 	"time"
 
 	ipc "github.com/james-barrow/golang-ipc"
@@ -35,7 +36,8 @@ type DaemonCmd struct {
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
 	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP template (x.x.x.x, zero bytes take the upstream subnet bytes) of the stick in RNDIS client submode, e.g. 0.0.22.33"`
 	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"5s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 5s, 30s"`
-	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to config RNDIS, you can use \"ip link\" to find the ifname name, such as usb0"`
+	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to create for RNDIS"`
+	RndisQmult           uint             `arg:"--rndis-qmult" default:"8" help:"usb ifname qmult (queue length multiplier) config for RNDIS"`
 	RndisSerialNumber    string           `arg:"--rndis-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the rndis usb gadget device"`
 	RndisManufacturer    string           `arg:"--rndis-manufacturer" default:"wifi-stick" help:"the manufacturer string of the rndis usb gadget device"`
 	RndisProduct         string           `arg:"--rndis-product" default:"RNDIS Ethernet" help:"the product string of the rndis usb gadget device"`
@@ -227,8 +229,14 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	// ---- prepare modes ----------------------------------------------------
 
+	var rndis_qmult string
+	if cmd.RndisQmult > 0 {
+		rndis_qmult = strconv.FormatUint(uint64(cmd.RndisQmult), 10)
+	} else {
+		rndis_qmult = ""
+	}
 	this.modes = []usb.UsbGadgetFunction{
-		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, "", cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
+		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
 		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv),
 	}
 

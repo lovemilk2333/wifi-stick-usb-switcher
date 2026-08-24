@@ -2,8 +2,7 @@ package usb
 
 import (
 	"fmt"
-	"log"
-	"os/exec"
+	"os"
 	"path/filepath"
 
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
@@ -156,25 +155,25 @@ func (this *UsbGadget) getLanguageStrings(subpath UsbGadgetSubpathStrings, value
 }
 
 func (this *UsbGadget) setLanguageStrings(subpath UsbGadgetSubpathStrings, value string) error {
-	full_subpath := base.Subpath(this.getStringsSubpath(subpath))
+	fullSubpath := string(base.Subpath(this.getStringsSubpath(subpath)))
+	fullFilePath := filepath.Join(this.Basepath, fullSubpath)
+	fullDirPath := filepath.Dir(fullFilePath)
 
-	// On configfs, the strings/<lang>/ directory must exist before its
-	// attribute files are writable. Use shell to create it and write the
-	// value — shell echo handles configfs quirks that os.WriteFile can't
-	// (os.WriteFile uses O_CREATE which configfs rejects for virtual files).
-	langDir := filepath.Dir(string(full_subpath))
-	fullDirPath := filepath.Join(this.Basepath, langDir)
-	fullFilePath := filepath.Join(this.Basepath, string(full_subpath))
-	script := fmt.Sprintf("mkdir -p '%s' && echo '%s' > '%s'",
-		fullDirPath, value, fullFilePath)
-
-	out, err := exec.Command("sh", "-c", script).CombinedOutput()
-	if err != nil {
-		log.Printf("ERROR setLanguageStrings FAILED: %s, output: %s\n", err, string(out))
-		return fmt.Errorf("cannot write language string: %w, output: %s", err, string(out))
+	if err := os.MkdirAll(fullDirPath, 0755); err != nil {
+		return fmt.Errorf("mkdir configfs lang dir failed: %w", err)
 	}
 
-	this.state[string(full_subpath)] = value
+	f, err := os.OpenFile(fullFilePath, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("open configfs attribute file failed: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(value + "\n"); err != nil {
+		return fmt.Errorf("write language string failed: %w", err)
+	}
+
+	this.state[fullSubpath] = value
 	return nil
 }
 
@@ -222,4 +221,3 @@ func NewUsbGadget(config_fs string) (*UsbGadget, error) {
 
 	return gadget, nil
 }
-
