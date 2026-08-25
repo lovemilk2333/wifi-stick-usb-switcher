@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"runtime/debug"
 	"strings"
 
 	// "math"
@@ -283,7 +282,7 @@ func (this *IPCFramework) check_data(package_type IPCPackageType, data []byte) e
 func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) error {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("WARN: package call handler panic: %v\n%s", r, debug.Stack())
+			log.Printf("WARN: package call handler panic: %v", r)
 		}
 	}()
 
@@ -495,7 +494,6 @@ func (this *IPCFramework) RegisterHandler(package_type IPCPackageType, handler I
 
 func (this *IPCFramework) RegisterHandlerReplace(package_type IPCPackageType, handler IPCFrameworkHandler) error {
 	if package_type <= 0 {
-		log.Printf("DEBUG 3")
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}
 

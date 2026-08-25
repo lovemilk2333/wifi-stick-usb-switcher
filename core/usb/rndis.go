@@ -781,6 +781,7 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	rndis.instance = instance
 	rndis._type = "rndis"
 	rndis.code = USB_GADGET_FUNCTION_CODE_RNDIS
+	rndis.max_submode = 1 // submode 0(网关)/1(从模式),enable() 只认这两个
 	return rndis
 }
 
@@ -802,5 +803,6 @@ func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr 
 
 	rndis._type = "rndis"
 	rndis.code = USB_GADGET_FUNCTION_CODE_RNDIS
+	rndis.max_submode = 1 // submode 0(网关)/1(从模式),enable() 只认这两个
 	return rndis
 }

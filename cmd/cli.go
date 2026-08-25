@@ -46,7 +46,7 @@ var (
 var ipc_client_chan daemonipc.IPCClientRespChannel
 
 func init_ipc_client(connect_timeout, dial_retry time.Duration) (*daemonipc.IPCFramework, error) {
-	daemonipc.InitServer(nil) // load server package types
+	daemonipc.InitServer(nil) // load server package definitions
 
 	ipc_client, channel := daemonipc.InitClient()
 	ipc_client_chan = channel

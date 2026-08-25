@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	ipc "github.com/james-barrow/golang-ipc"
@@ -64,9 +65,8 @@ type Daemon struct {
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
 	submode_changed  bool
-	turn_off_leds    bool
+	turn_off_leds    atomic.Bool // IPC goroutine 写、applyFunction goroutine 读,需原子
 	tick_rate        time.Duration
-	daemonipc        *daemonipc.IPCFramework
 	daemonipc_config *ipc.ServerConfig
 
 	// submode selection state:长按进入选择模式后,短按切换 submode,
@@ -99,24 +99,30 @@ func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
 }
 
 func (this *Daemon) GetTurnOffLeds() bool {
-	return this.turn_off_leds
+	return this.turn_off_leds.Load()
 }
 
 func (this *Daemon) SetTurnOffLeds(off bool) {
-	this.turn_off_leds = off
+	this.turn_off_leds.Store(off)
+	this.applyLedState() // IPC 线程改完立即生效,不等下一次模式切换
+}
+
+// applyLedState 按 turn_off_leds 立即设置当前 LED:关 / 显示 submode 状态。
+// 由 IPC handler(goroutine)调用,与 Tick/applyFunction 的并发是既有模型。
+func (this *Daemon) applyLedState() {
+	if interpreter := this.currentInterpreter(); interpreter != nil {
+		if this.turn_off_leds.Load() {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		} else {
+			interpreter.SetMode(this.submodeLedMode())
+		}
+	}
 }
 
 // Mainloop runs the daemon event loop at the configured tick rate.
 func (this *Daemon) Mainloop() error {
-	ipc_server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
-	if err != nil {
-		return err
-	}
-
-	err = this.daemonipc.Start(ipc_server)
-	if err != nil {
-		return err
-	}
+	// IPC server 由独立 goroutine 托管(挂了自动重建),不阻塞主循环
+	go this.runIpcServer()
 
 	log.Printf("INFO daemon LED init\n")
 	for _, interpreter := range this.interpreters {
@@ -137,6 +143,29 @@ func (this *Daemon) Mainloop() error {
 	}
 
 	return nil
+}
+
+// runIpcServer 持续提供 IPC server。golang-ipc 的 server 是一次性的:
+// 握手失败(旧 cli 二进制、cli 半途退出)会关闭 listener、框架 mainloop
+// 退出 —— 死掉就重建(socket 文件由库 run() 先 RemoveAll,无残留)。
+// daemon 主循环不依赖 IPC,IPC 故障不影响设备功能。
+func (this *Daemon) runIpcServer() {
+	for {
+		server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
+		if err != nil {
+			log.Printf("WARN: ipc server start: %v", err)
+		} else {
+			fw := daemonipc.InitServer(this) // 新框架,重新注册 handler
+			if err := fw.Start(server); err != nil {
+				log.Printf("WARN: ipc framework start: %v", err)
+				server.Close()
+			} else {
+				fw.Wait() // 阻塞到 mainloop 退出(Read 报错 break)
+				log.Printf("WARN: ipc server down, restarting")
+			}
+		}
+		time.Sleep(time.Second) // 避免失败风暴
+	}
 }
 
 var LED_MODE_BLINK *led.LedMode
@@ -243,8 +272,9 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	this.interpreters = loadLedInterpreters(cmd.Leds)
 
 	// ---- init ipc ----
-	daemonipc.InitClient() // load client package types
-	this.daemonipc = daemonipc.InitServer(this)
+	// InitClient 注册响应包的 payload struct 到全局表,server 端
+	// SendPackage 校验时需要;server handler 由 runIpcServer 每次注册
+	daemonipc.InitClient() // load client package definitions
 	this.daemonipc_config = &ipc.ServerConfig{
 		Encryption:        false,
 		UnmaskPermissions: cmd.IPCAllowOtherUser,
@@ -254,6 +284,15 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 }
 
 func (this *Daemon) applyFunction() {
+	defer func() {
+		if r := recover(); r != nil {
+			// USB 操作链上的 panic 会杀整个进程,兜底;必须释放模式切换锁,
+			// 否则 mode_changing 卡死,之后再也切不了模式
+			log.Printf("WARN: applyFunction panic: %v", r)
+			this.mode_changing = false
+		}
+	}()
+
 	this.mode_changing = true
 
 	// submode 切换:函数不变,不重建 gadget(重建会断开对端 RNDIS 网卡,
@@ -266,7 +305,7 @@ func (this *Daemon) applyFunction() {
 		if err := this.controller.ReconfigureFunction(this.modes[this.current_mode]); err != nil {
 			log.Printf("WARN: cannot reconfigure function: %v\n", err)
 		}
-		if !this.turn_off_leds {
+		if !this.turn_off_leds.Load() {
 			if interpreter := this.currentInterpreter(); interpreter != nil {
 				interpreter.SetMode(this.submodeLedMode())
 			}
@@ -307,7 +346,7 @@ func (this *Daemon) applyFunction() {
 	}
 
 	// 完成后按 submode 显示 LED:0 常亮 / 1 慢闪(submode % 2 取 index)
-	if !this.turn_off_leds {
+	if !this.turn_off_leds.Load() {
 		if interpreter := this.currentInterpreter(); interpreter != nil {
 			interpreter.SetMode(this.submodeLedMode())
 		}
@@ -352,9 +391,11 @@ func (this *Daemon) Tick() {
 		switch event.Type {
 		case input.INPUT_TAP:
 			if this.submode_selection {
-				// 子模式选择状态:短按切换 submode(0→1→2...,LED 用 % 2 显示)
+				// 子模式选择状态:短按循环切换 submode(LED 用 % 2 显示)
 				mode := this.modes[this.current_mode]
-				mode.SetSubmode(mode.GetSubmode() + 1)
+				// submode 有界循环 0~max_submode(RNDIS 只有 0/1):无限 +1
+				// 会让 enable() 遇到不认识的值报错("have no such submode")
+				mode.SetSubmode((mode.GetSubmode() + 1) % (mode.MaxSubmode() + 1))
 				this.mode_changed = true
 				this.submode_changed = true
 			} else {

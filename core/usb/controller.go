@@ -82,6 +82,9 @@ type UsbGadgetFunction interface {
 	// effect(applyFunction 重建 gadget 时 effect() 消费它)。
 	GetSubmode() int
 	SetSubmode(mode int)
+	// MaxSubmode 返回 submode 上界(支持 0~MaxSubmode),切换时取模,
+	// 防止 +1 无限增长撞上 enable() 只认识有限值
+	MaxSubmode() int
 }
 
 type UsbGadgetFunctionBase struct {
@@ -90,6 +93,8 @@ type UsbGadgetFunctionBase struct {
 	code     UsbGadgetFunctionCode
 	effected bool
 	submode  int
+	// submode 上界,构造时设定(RNDIS 1,ADB 默认 0 无 submode)
+	max_submode int
 }
 
 func (this *UsbGadgetFunctionBase) GetSubmode() int {
@@ -98,6 +103,10 @@ func (this *UsbGadgetFunctionBase) GetSubmode() int {
 
 func (this *UsbGadgetFunctionBase) SetSubmode(mode int) {
 	this.submode = mode
+}
+
+func (this *UsbGadgetFunctionBase) MaxSubmode() int {
+	return this.max_submode
 }
 
 func (this *UsbGadgetFunctionBase) getType() string {

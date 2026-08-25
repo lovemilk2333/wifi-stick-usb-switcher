@@ -29,9 +29,9 @@ func InitClient() (*IPCFramework, IPCClientRespChannel) {
 		PACKAGE_TOGGLE_LED_RESP,
 		func(this *IPCFramework, turn_off_led bool) {
 			if turn_off_led {
-				channel <- "led turn off"
+				channel <- "led: off"
 			} else {
-				channel <- "led turn on"
+				channel <- "led: on"
 			}
 		},
 	)
