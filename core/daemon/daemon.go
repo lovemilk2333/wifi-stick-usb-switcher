@@ -126,6 +126,9 @@ func (this *Daemon) Mainloop() error {
 
 	log.Printf("INFO daemon LED init\n")
 	for _, interpreter := range this.interpreters {
+		if interpreter == nil {
+			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
+		}
 		interpreter.SetMode(led.MODE_PRESET_ON)
 		interpreter.Tick()
 		time.Sleep(time.Millisecond * 500)
@@ -434,17 +437,24 @@ func (this *Daemon) Tick() {
 		this.mode_changing = true
 
 		for _, interpreter := range this.interpreters {
-			interpreter.SetMode(led.MODE_PRESET_OFF)
+			if interpreter != nil {
+				interpreter.SetMode(led.MODE_PRESET_OFF)
+			}
 		}
 
 		go this.applyFunction()
 	}
 
 	for _, interpreter := range this.interpreters {
-		interpreter.Tick()
+		if interpreter != nil {
+			interpreter.Tick()
+		}
 	}
 }
 
+// loadLedInterpreters 初始化每个 LED 设备;失败的槽位留 nil(消费方
+// 遍历时判空跳过),避免单颗 LED 故障(systemd 开机时序 sysfs 未就绪)
+// 拖垮整个 daemon。
 func loadLedInterpreters(ledDevnodes []string) []*led.LedInterpreter {
 	interpreters := make([]*led.LedInterpreter, len(ledDevnodes))
 
