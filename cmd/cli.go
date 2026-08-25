@@ -110,13 +110,14 @@ func main() {
 	case args.IPC != nil:
 		fw, err := init_ipc_client()
 		if err != nil {
-			log.Fatalf("cannot start IPC client: %v", err)
-			return
+			log.Printf("cannot start IPC client: %v", err)
+			os.Exit(65)
 		}
 
 		msg, err := call_ipc(fw, args.IPC.Timeout, args.IPC.Command, args.IPC.Args)
 		if err != nil {
-			log.Fatalf("cannot call IPC: %v", err)
+			log.Printf("cannot call IPC: %v", err)
+			os.Exit(66)
 		} else {
 			fmt.Println(msg)
 		}
@@ -126,22 +127,23 @@ func main() {
 
 		err := lock2core(last_core)
 		if err != nil {
-			log.Fatalf("cannot lock to CPU core: %v", err)
-			return
+			log.Printf("cannot lock to CPU core: %v", err)
+			os.Exit(1)
 		}
 
 		daemon, err := daemon.NewDaemon(args.Daemon)
 		if err != nil {
-			log.Fatalf("cannot init daemon: %v", err)
-			return
+			log.Printf("cannot init daemon: %v", err)
+			os.Exit(2)
 		}
 
 		err = daemon.Mainloop()
 		if err != nil {
-			log.Fatalf("cannot start daemon: %v", err)
-			return
+			log.Printf("cannot start daemon: %v", err)
+			os.Exit(3)
 		}
 	default:
 		parser.WriteHelp(os.Stdout)
+		os.Exit(127)
 	}
 }

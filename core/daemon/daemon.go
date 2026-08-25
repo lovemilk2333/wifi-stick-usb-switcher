@@ -344,7 +344,7 @@ func (this *Daemon) Tick() {
 		log.Printf("%+v\n", event)
 
 		if event.Status != input.DEVICE_STATUS_NORMAL {
-			log.Fatalf("FATAL: %s\n", event.Error.Error())
+			log.Printf("ERROR: %s\n", event.Error.Error())
 			continue
 		}
 
