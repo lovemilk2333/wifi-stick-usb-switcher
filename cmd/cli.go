@@ -81,6 +81,7 @@ func init_ipc_client(connect_timeout, dial_retry time.Duration) (*daemonipc.IPCF
 }
 
 func call_ipc(ipc_client *daemonipc.IPCFramework, ipc_args *IPCCmd, command string, args []string) (string, error) {
+	// TODO handle different IPCs with different args
 	var err error
 
 	if ipc_client_chan == nil {
