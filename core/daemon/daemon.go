@@ -246,6 +246,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	daemonipc.InitClient() // load client package types
 	this.daemonipc = daemonipc.InitServer(this)
 	this.daemonipc_config = &ipc.ServerConfig{
+		Encryption:        false,
 		UnmaskPermissions: cmd.IPCAllowOtherUser,
 	}
 

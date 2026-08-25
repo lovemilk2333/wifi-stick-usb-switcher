@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime/debug"
 	"strings"
 
 	// "math"
@@ -106,8 +107,9 @@ func (this *IPCFramework) mainloop() {
 	for {
 		msg, err := this.ipc_impl.Read()
 		if err != nil {
+			// Read 出错后库会关闭通道,再读只会无限报同样的错,直接退出
 			log.Printf("WARN: package cannot receive: %v", err)
-			continue
+			break
 		}
 
 		if msg.MsgType <= 0 {
@@ -220,8 +222,10 @@ func (this *IPCFramework) parse_payload(payload_struct []reflect.Type, payload_o
 
 		actual_type := reflect.TypeOf(value)
 
-		if value, ok := value.(json.Number); ok {
-			val, err := this.payload_handle_number(value, type_)
+		// 注意:number 变量 shadow 原始 value,else 分支必须用回原始
+		// value —— 曾误用 shadow 的零值 json.Number 做 Convert 而 panic
+		if number, ok := value.(json.Number); ok {
+			val, err := this.payload_handle_number(number, type_)
 			if err != nil {
 				message += err.Error()
 				error_count++
@@ -279,7 +283,7 @@ func (this *IPCFramework) check_data(package_type IPCPackageType, data []byte) e
 func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) error {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("WARN: package call handler panic: %v", r)
+			log.Printf("WARN: package call handler panic: %v\n%s", r, debug.Stack())
 		}
 	}()
 
