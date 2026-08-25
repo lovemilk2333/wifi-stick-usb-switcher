@@ -4,8 +4,11 @@ import (
 	"log"
 )
 
-func InitClient() *IPCFramework {
+type IPCClientRespChannel chan string
+
+func InitClient() (*IPCFramework, IPCClientRespChannel) {
 	IPClient := NewIPCFramework()
+	channel := make(IPCClientRespChannel, 16)
 
 	IPClient.SetFallbackHandler(func(this *IPCFramework, status IPCHandlerStatus, err error, package_type IPCPackageType, data []byte) (*IPCPackage, error) {
 		switch status {
@@ -25,9 +28,13 @@ func InitClient() *IPCFramework {
 	IPClient.RegisterHandler(
 		PACKAGE_TOGGLE_LED_RESP,
 		func(this *IPCFramework, turn_off_led bool) {
-			// TODO
+			if turn_off_led {
+				channel <- "led turn off"
+			} else {
+				channel <- "led turn on"
+			}
 		},
 	)
 
-	return IPClient
+	return IPClient, channel
 }

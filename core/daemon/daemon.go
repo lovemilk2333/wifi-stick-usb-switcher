@@ -108,17 +108,15 @@ func (this *Daemon) SetTurnOffLeds(off bool) {
 
 // Mainloop runs the daemon event loop at the configured tick rate.
 func (this *Daemon) Mainloop() error {
-	// TODO impl IPC
+	ipc_server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
+	if err != nil {
+		return err
+	}
 
-	// ipc_server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
-	// if err != nil {
-	// 	return err
-	// }
-
-	// err = this.daemonipc.Start(ipc_server)
-	// if err != nil {
-	// 	return err
-	// }
+	err = this.daemonipc.Start(ipc_server)
+	if err != nil {
+		return err
+	}
 
 	log.Printf("INFO daemon LED init\n")
 	for _, interpreter := range this.interpreters {
@@ -244,12 +242,12 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	this.interpreters = loadLedInterpreters(cmd.Leds)
 
-	// ---- init ipc
-	// TODO
-	// this.daemonipc = daemonipc.InitServer(this)
-	// this.daemonipc_config = &ipc.ServerConfig{
-	// 	UnmaskPermissions: cmd.IPCAllowOtherUser,
-	// }
+	// ---- init ipc ----
+	daemonipc.InitClient() // load client package types
+	this.daemonipc = daemonipc.InitServer(this)
+	this.daemonipc_config = &ipc.ServerConfig{
+		UnmaskPermissions: cmd.IPCAllowOtherUser,
+	}
 
 	return nil
 }

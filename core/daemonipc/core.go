@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 
 	// "math"
@@ -106,6 +107,7 @@ func (this *IPCFramework) mainloop() {
 		msg, err := this.ipc_impl.Read()
 		if err != nil {
 			log.Printf("WARN: package cannot receive: %v", err)
+			continue
 		}
 
 		if msg.MsgType <= 0 {
@@ -115,6 +117,7 @@ func (this *IPCFramework) mainloop() {
 		err = this.handle_data(IPCPackageType(msg.MsgType), msg.Data)
 		if err != nil {
 			log.Printf("WARN: package handle error: %v", err)
+			continue
 		}
 	}
 }
@@ -149,51 +152,50 @@ func (this *IPCFramework) get_payload_struct_by_handler(function any) ([]reflect
 const FLOAT64_MIN_EXACT_INT = -1 << 53
 const FLOAT64_MAX_EXACT_INT = 1 << 53
 
-// func (this *IPCFramework) payload_handle_number(value float64, target reflect.Type) (reflect.Value, error) {
-// 	if math.IsNaN(value) || math.IsInf(value, 0) {
-// 		return reflect.Value{}, fmt.Errorf("value is inf or nan")
-// 	}
+func (this *IPCFramework) payload_handle_number(value json.Number, target reflect.Type) (reflect.Value, error) {
+	kind := target.Kind()
+	value_int, int_err := value.Int64()
+	valid_int := int_err == nil
 
-// 	kind := target.Kind()
-// 	valid_int := value >= FLOAT64_MIN_EXACT_INT && value <= FLOAT64_MAX_EXACT_INT && math.Trunc(value) == value
+	switch kind {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if !valid_int {
+			return reflect.Value{}, fmt.Errorf("value is not integer")
+		}
+		if target.OverflowInt(value_int) {
+			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
+		}
 
-// 	switch kind {
-// 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-// 		if !valid_int {
-// 			return reflect.Value{}, fmt.Errorf("value is not integer")
-// 		}
+		return reflect.ValueOf(value_int).Convert(target), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if !valid_int {
+			return reflect.Value{}, fmt.Errorf("value is not a integer")
+		}
 
-// 		int_val := int64(value)
-// 		if target.OverflowInt(int_val) {
-// 			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
-// 		}
+		if value_int < 0 {
+			return reflect.Value{}, fmt.Errorf("negative value for %s", target.Name())
+		}
 
-// 		return reflect.ValueOf(int_val).Convert(target), nil
-// 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-// 		if !valid_int {
-// 			return reflect.Value{}, fmt.Errorf("value is not a integer")
-// 		}
+		if target.OverflowUint(uint64(value_int)) {
+			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
+		}
 
-// 		if value < 0 {
-// 			return reflect.Value{}, fmt.Errorf("negative value for %s", target.Name())
-// 		}
+		return reflect.ValueOf(value_int).Convert(target), nil
+	case reflect.Float32, reflect.Float64:
+		value_float, _ := value.Float64()
+		if math.IsNaN(value_float) || math.IsInf(value_float, 0) {
+			return reflect.Value{}, fmt.Errorf("value is inf or nan")
+		}
 
-// 		uint_val := uint64(value)
-// 		if target.OverflowUint(uint_val) {
-// 			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
-// 		}
+		if target.OverflowFloat(value_float) {
+			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
+		}
 
-// 		return reflect.ValueOf(uint_val).Convert(target), nil
-// 	case reflect.Float32, reflect.Float64:
-// 		if target.OverflowFloat(value) {
-// 			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
-// 		}
-
-// 		return reflect.ValueOf(value).Convert(target), nil
-// 	default:
-// 		return reflect.Value{}, fmt.Errorf("target type is not a number type (got %s)", target.Name())
-// 	}
-// }
+		return reflect.ValueOf(value_float).Convert(target), nil
+	default:
+		return reflect.Value{}, fmt.Errorf("target type is not a number type (got %s)", target.Name())
+	}
+}
 
 func (this *IPCFramework) parse_payload(payload_struct []reflect.Type, payload_original []any) ([]reflect.Value, error) {
 	payload_length := len(payload_original)
@@ -218,16 +220,15 @@ func (this *IPCFramework) parse_payload(payload_struct []reflect.Type, payload_o
 
 		actual_type := reflect.TypeOf(value)
 
-		// if actual_type.Kind() == reflect.Float64 {
-		// 	val, err := this.payload_handle_number(value.(float64), type_)
-		// 	if err != nil {
-		// 		message += err.Error()
-		// 		error_count++
-		// 		continue
-		// 	}
-		// 	payload = append(payload, val)
-		// } else if !actual_type.AssignableTo(type_) {
-		if !actual_type.AssignableTo(type_) {
+		if value, ok := value.(json.Number); ok {
+			val, err := this.payload_handle_number(value, type_)
+			if err != nil {
+				message += err.Error()
+				error_count++
+				continue
+			}
+			payload = append(payload, val)
+		} else if !actual_type.AssignableTo(type_) {
 			message += fmt.Sprintf("invalid payload arg `%d`: excepted type %s, but got %s: %v", index, type_, actual_type, value)
 			error_count++
 			continue
@@ -263,7 +264,7 @@ func (this *IPCFramework) parse_data(payload_struct []reflect.Type, data []byte)
 
 func (this *IPCFramework) check_data(package_type IPCPackageType, data []byte) error {
 	payload_struct := this.GetPayloadStruct(package_type)
-	if payload_struct != nil {
+	if payload_struct == nil {
 		return fmt.Errorf("package cannot get payload struct for `%d`", package_type)
 	}
 
@@ -417,13 +418,20 @@ func (this *IPCFramework) payload2json(payload []any) ([]byte, error) {
 send package with non-convert typed payload, which each payload item is string
 */
 func (this *IPCFramework) SendRaw(package_type IPCPackageType, non_converted_payload []string) error {
-	// TODO handle value by struct types
 	buffer := strings.NewReader("")
 	decoder := json.NewDecoder(buffer)
 	decoder.UseNumber()
 
+	payload_struct := this.GetPayloadStruct(package_type)
+
 	payload := make([]any, len(non_converted_payload))
 	for index, value := range non_converted_payload {
+		if payload_struct[index].Kind() == reflect.String {
+			// keep original if the target type is string
+			payload[index] = value
+			continue
+		}
+
 		buffer.Reset(value)
 		err := decoder.Decode(&payload[index])
 		if err != nil {
@@ -474,7 +482,7 @@ func (this *IPCFramework) RegisterHandler(package_type IPCPackageType, handler I
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}
 
-	if _, ok := this.handlers[package_type]; !ok {
+	if _, ok := this.handlers[package_type]; ok {
 		return fmt.Errorf("package handler for `%d` already registered", package_type)
 	}
 
@@ -483,6 +491,7 @@ func (this *IPCFramework) RegisterHandler(package_type IPCPackageType, handler I
 
 func (this *IPCFramework) RegisterHandlerReplace(package_type IPCPackageType, handler IPCFrameworkHandler) error {
 	if package_type <= 0 {
+		log.Printf("DEBUG 3")
 		return fmt.Errorf("package type must >= 0, got `%d`", package_type)
 	}
 
