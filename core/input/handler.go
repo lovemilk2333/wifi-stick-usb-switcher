@@ -77,6 +77,8 @@ func (this *InputDevice) check() error {
 	return nil
 }
 
+// resetPress 重置按压状态,必须在 lock 内调用(State 无锁读会撕裂,
+// 读到 pressed=true 但 press_start 已被清零 → 假超时长按)。
 func (this *InputDevice) resetPress() {
 	this.pressed = false
 	this.press_start = TIME_ZERO
@@ -146,23 +148,31 @@ func (this *InputDevice) daemon() {
 				if this.pressed {
 					continue
 				}
+				this.lock.Lock()
 				this.pressed = true
 				this.press_start = event_time
+				this.lock.Unlock()
 			case 0: // KEY UP
 				if !this.pressed {
 					continue
 				}
 
+				// 整个状态处理在锁内:IsZero 兜底会写 press_start,
+				// 与 State() 的锁内读竞争,不能留在锁外
+				this.lock.Lock()
+
+				if this.press_start.IsZero() {
+					this.press_start = event_time
+				}
+				duration := event_time.Sub(this.press_start)
+
 				e := &InputEvent{
 					Devnode:  this.devnode,
 					Time:     event_time,
+					Duration: duration,
 					TapCount: 1,
 					Status:   DEVICE_STATUS_NORMAL,
 				}
-
-				duration := event_time.Sub(this.press_start)
-				e.Duration = duration
-
 				if duration >= this.Config.LongTapThreshold {
 					e.Type = INPUT_LONG_TAP
 				} else {
@@ -170,8 +180,6 @@ func (this *InputDevice) daemon() {
 				}
 
 				this.resetPress()
-
-				this.lock.Lock()
 				this.event_queue.PushBack(e)
 				this.lock.Unlock()
 			}
@@ -181,9 +189,8 @@ func (this *InputDevice) daemon() {
 			now := time.Now()
 			duration := now.Sub(this.press_start)
 			if duration >= this.Config.LongTapThreshold {
-				this.resetPress()
-
 				this.lock.Lock()
+				this.resetPress()
 				this.event_queue.PushBack(&InputEvent{
 					Devnode:  this.devnode,
 					Type:     INPUT_LONG_TAP,
@@ -196,6 +203,44 @@ func (this *InputDevice) daemon() {
 			}
 		}
 	}
+}
+
+func (this *InputDevice) State() *InputEvent {
+	// 与 daemon() 写 pressed/press_start 同步,否则可能读到
+	// pressed=true + press_start=零值,返回假超时长按
+	this.lock.Lock()
+	defer this.lock.Unlock()
+
+	if !this.pressed {
+		return nil
+	}
+
+	event_time := time.Now()
+
+	// 兜底:press_start 未初始化(理论上不会)时按本地时间算,
+	// 避免 now - 零值 的超长 duration 误报 long-tap;
+	// 只算本地值不回写共享状态(State 是查询 API)
+	press_start := this.press_start
+	if press_start.IsZero() {
+		press_start = event_time
+	}
+	duration := event_time.Sub(press_start)
+
+	e := &InputEvent{
+		Devnode:  this.devnode,
+		Time:     event_time,
+		Duration: duration,
+		TapCount: 1,
+		Status:   DEVICE_STATUS_NORMAL,
+	}
+
+	if duration >= this.Config.LongTapThreshold {
+		e.Type = INPUT_LONG_TAP
+	} else {
+		e.Type = INPUT_TAP
+	}
+
+	return e
 }
 
 func (this *InputDevice) Tick() []*InputEvent {
