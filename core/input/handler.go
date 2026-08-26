@@ -59,6 +59,9 @@ type InputDevice struct {
 	device      *evdev.InputDevice
 	pressed     bool
 	press_start time.Time
+	// LongTapImmediately 已上报 LONG_TAP:松开时不再产生事件
+	// (按下状态由 pressed 保持,State() 持续可见,直至松开复位)
+	long_tap_reported bool
 
 	lock        sync.Mutex
 	event_queue *list.List
@@ -151,6 +154,7 @@ func (this *InputDevice) daemon() {
 				this.lock.Lock()
 				this.pressed = true
 				this.press_start = event_time
+				this.long_tap_reported = false
 				this.lock.Unlock()
 			case 0: // KEY UP
 				if !this.pressed {
@@ -165,6 +169,14 @@ func (this *InputDevice) daemon() {
 					this.press_start = event_time
 				}
 				duration := event_time.Sub(this.press_start)
+
+				if this.long_tap_reported {
+					// LONG_TAP 已在按住时上报,松开只复位状态,不再产生事件
+					this.long_tap_reported = false
+					this.resetPress()
+					this.lock.Unlock()
+					continue
+				}
 
 				e := &InputEvent{
 					Devnode:  this.devnode,
@@ -185,12 +197,14 @@ func (this *InputDevice) daemon() {
 			}
 		}
 
-		if this.Config.LongTapImmediately && this.pressed {
+		if this.Config.LongTapImmediately && this.pressed && !this.long_tap_reported {
 			now := time.Now()
 			duration := now.Sub(this.press_start)
 			if duration >= this.Config.LongTapThreshold {
 				this.lock.Lock()
-				this.resetPress()
+				// 不 resetPress:保持 pressed=true 让 State() 继续反映按住状态
+				// (daemon 长按关机依赖),long_tap_reported 防重复上报
+				this.long_tap_reported = true
 				this.event_queue.PushBack(&InputEvent{
 					Devnode:  this.devnode,
 					Type:     INPUT_LONG_TAP,
