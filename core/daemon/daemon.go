@@ -5,6 +5,8 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
+	"os/exec"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -49,6 +51,9 @@ type DaemonCmd struct {
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
 	IPCAllowOtherUser    bool             `arg:"--ipc-share, --ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
 	TickRate             time.Duration    `arg:"--tick-rate" default:"50ms" help:"daemon event loop tick rate"`
+	ShutdownThreshold    time.Duration    `arg:"--shutdown-threshold" default:"10s" help:"long-press shutdown threshold, must be greater than --long-tap-threshold; 0 disables"`
+	ShutdownCommand      string           `arg:"--shutdown-command" default:"poweroff" help:"command run when long-press shutdown triggers"`
+	Shell                string           `arg:"--shell" default:"/bin/bash" help:"shell used to run --shutdown-command, fallback when $SHELL is unset"`
 }
 
 type Daemon struct {
@@ -80,6 +85,15 @@ type Daemon struct {
 	submode_selection  bool
 	submode_entry_done bool
 	submode_entry_mode *led.LedMode
+
+	// 长按关机状态(均由 mainloop 的 Tick 单 goroutine 读写,无需锁):
+	// shutdown_armed = 按住时长已 >= shutdown_threshold,LED 全灭等松开;
+	// shutting_down = 松开已进入关机流程,不再处理任何事件。
+	shutdown_threshold time.Duration
+	shutdown_command   string
+	shell              string
+	shutdown_armed     bool
+	shutting_down      bool
 }
 
 // LED_SUBMODE_MODES 是 submode 对应的 LED 显示模式,index = submode % 2:
@@ -206,6 +220,14 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	if cmd.RndisClientTimeout <= 0 {
 		return fmt.Errorf("`--rndis-client-timeout` must be positive")
 	}
+
+	// 长按关机阈值必须大于长按阈值,否则长按会先触发子模式选择再触发关机
+	if cmd.ShutdownThreshold > 0 && cmd.ShutdownThreshold <= cmd.LongTapThreshold {
+		return fmt.Errorf("`--shutdown-threshold` must be greater than `--long-tap-threshold`")
+	}
+	this.shutdown_threshold = cmd.ShutdownThreshold
+	this.shutdown_command = cmd.ShutdownCommand
+	this.shell = cmd.Shell
 
 	// 初始 true:见 struct 注释 —— 启动时不要误触发关闭期检查
 	this.submode_entry_done = true
@@ -383,6 +405,37 @@ func (this *Daemon) currentInterpreter() *led.LedInterpreter {
 }
 
 func (this *Daemon) Tick() {
+	// 长按关机检测,优先级高于一切事件处理:按住时长 >= shutdown_threshold
+	// 后 LED 全灭等待松开,松开即执行关机命令
+	if this.shutting_down {
+		return // 关机流程中,停止除 INPUT Grab 外的一切事件处理
+	}
+
+	if this.shutdown_threshold > 0 {
+		st := this.input_device.State()
+		if st != nil && st.Duration >= this.shutdown_threshold {
+			if !this.shutdown_armed {
+				this.shutdown_armed = true
+				log.Printf("WARN: shutdown armed, release button to power off\n")
+			}
+			// 每 tick 强制全灭:applyFunction goroutine 完成后会 SetMode
+			// (submode 显示),可能在此之间点亮
+			for _, interpreter := range this.interpreters {
+				if interpreter != nil {
+					interpreter.SetMode(led.MODE_PRESET_OFF)
+				}
+			}
+			return
+		}
+		if this.shutdown_armed && st == nil {
+			// 松开按钮:进入关机流程
+			this.shutdown_armed = false
+			this.shutting_down = true
+			go this.doShutdown()
+			return
+		}
+	}
+
 	for _, event := range this.input_device.Tick() {
 		log.Printf("%+v\n", event)
 
@@ -449,6 +502,34 @@ func (this *Daemon) Tick() {
 		if interpreter != nil {
 			interpreter.Tick()
 		}
+	}
+}
+
+// doShutdown 关机流程:LED 反向(最后至最前)逐颗亮起 500ms 提示,
+// 然后执行关机命令。由松开按钮的 tick 触发,独立 goroutine,不再
+// 处理任何输入事件(evdev Grab 保持,不 Close)。
+func (this *Daemon) doShutdown() {
+	for i := len(this.interpreters) - 1; i >= 0; i-- {
+		interpreter := this.interpreters[i]
+		if interpreter == nil {
+			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
+		}
+		interpreter.SetMode(led.MODE_PRESET_ON)
+		interpreter.Tick()
+		time.Sleep(time.Millisecond * 500)
+		interpreter.SetMode(led.MODE_PRESET_OFF)
+	}
+
+	// 优先用环境变量 $SHELL(如 systemd 服务里未设置则为空),
+	// 未设置时用 --shell(默认 /bin/bash)
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = this.shell
+	}
+	log.Printf("WARN: executing shutdown command: %s -c %s\n", shell, this.shutdown_command)
+	out, err := exec.Command(shell, "-c", this.shutdown_command).CombinedOutput()
+	if err != nil {
+		log.Printf("ERROR: shutdown command failed: %v: %s\n", err, out)
 	}
 }
 

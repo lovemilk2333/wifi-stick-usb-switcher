@@ -23,6 +23,7 @@
 | :---------------- | :---------------------------------------------- | :-------------------------------------------------------------- |
 | 短按 tap          | 按下时间 < `--long-tap-threshold`(500ms)        | 未在选择中:切换到下一个模式;子模式选择中:切换子模式             |
 | 长按 long-tap     | 按下时间 ≥ `--long-tap-threshold`               | 进入/退出子模式选择,LED 先关闭 `--submode-led-duration`(750ms) 提示 |
+| 长按关机          | 按住时间 ≥ `--shutdown-threshold`(10s,须 > 长按阈值,`0` 禁用) | 全部 LED 关闭进入关机待命;松开后 LED 反向逐颗亮起(最后至最前,各 500ms),随后执行 `--shutdown-command`;触发后停止一切事件处理(INPUT Grab 保持) |
 | 连击 multiple-tap | `--multiple-tap-threshold`(500ms)内的连续 tap   | 预留(TODO)                                                     |
 
 - `--long-tap-immediately`(默认开启):按下时间一到阈值立即上报长按,无需等松开。
@@ -51,6 +52,7 @@
 | 子模式切换(选择中短按)  | LED 关闭                                                             |
 | 子模式状态               | 0 → 常亮;1 → 慢闪(500ms on / 500ms off)                             |
 | `cli ipc toggle-led`     | 1 关闭所有 LED(立即生效,不等待下一次模式切换);2 恢复                |
+| 长按关机待命/松开        | 待命时全部 LED 关闭;松开后反向逐颗亮起 500ms(最后至最前),再执行关机命令 |
 
 ## 构建
 
@@ -113,6 +115,9 @@
 | `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                   |
 | `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)        |
 | `--tick-rate`              | `50ms`                             | daemon 事件循环 tick 间隔                          |
+| `--shutdown-threshold`     | `10s`                              | 长按关机阈值,必须 > `--long-tap-threshold`,`0` 禁用 |
+| `--shutdown-command`       | `poweroff`                         | 长按关机时执行的命令                              |
+| `--shell`                  | `/bin/bash`                        | 执行关机命令的 shell,`$SHELL` 环境变量优先        |
 
 ### `cli ipc <command> [args]`
 
