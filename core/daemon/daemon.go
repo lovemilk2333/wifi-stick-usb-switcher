@@ -87,12 +87,13 @@ type Daemon struct {
 	submode_entry_mode *led.LedMode
 
 	// 长按关机状态(均由 mainloop 的 Tick 单 goroutine 读写,无需锁):
-	// shutdown_armed = 按住时长已 >= shutdown_threshold,LED 全灭等松开;
-	// shutting_down = 松开已进入关机流程,不再处理任何事件。
+	// 按住时长 >= shutdown_threshold 后立即执行关机命令,不等松开 ——
+	// 默认按键是 KEY_RESTART,松开事件会触发系统级重启,poweroff
+	// 必须在按住期间调用,松开发生在关机过程中;
+	// shutting_down = 已进入关机流程,不再处理任何事件。
 	shutdown_threshold time.Duration
 	shutdown_command   string
 	shell              string
-	shutdown_armed     bool
 	shutting_down      bool
 }
 
@@ -406,31 +407,16 @@ func (this *Daemon) currentInterpreter() *led.LedInterpreter {
 
 func (this *Daemon) Tick() {
 	// 长按关机检测,优先级高于一切事件处理:按住时长 >= shutdown_threshold
-	// 后 LED 全灭等待松开,松开即执行关机命令
+	// 立即关机 —— 默认按键是 KEY_RESTART,松开事件会触发系统重启,
+	// poweroff 必须在按住期间调用,不能等松开
 	if this.shutting_down {
 		return // 关机流程中,停止除 INPUT Grab 外的一切事件处理
 	}
 
 	if this.shutdown_threshold > 0 {
-		st := this.input_device.State()
-		if st != nil && st.Duration >= this.shutdown_threshold {
-			if !this.shutdown_armed {
-				this.shutdown_armed = true
-				log.Printf("WARN: shutdown armed, release button to power off\n")
-			}
-			// 每 tick 强制全灭:applyFunction goroutine 完成后会 SetMode
-			// (submode 显示),可能在此之间点亮
-			for _, interpreter := range this.interpreters {
-				if interpreter != nil {
-					interpreter.SetMode(led.MODE_PRESET_OFF)
-				}
-			}
-			return
-		}
-		if this.shutdown_armed && st == nil {
-			// 松开按钮:进入关机流程
-			this.shutdown_armed = false
+		if st := this.input_device.State(); st != nil && st.Duration >= this.shutdown_threshold {
 			this.shutting_down = true
+			log.Printf("WARN: long-press shutdown triggered\n")
 			go this.doShutdown()
 			return
 		}
@@ -506,8 +492,8 @@ func (this *Daemon) Tick() {
 }
 
 // doShutdown 关机流程:LED 反向(最后至最前)逐颗亮起 500ms 提示,
-// 然后执行关机命令。由松开按钮的 tick 触发,独立 goroutine,不再
-// 处理任何输入事件(evdev Grab 保持,不 Close)。
+// 然后执行关机命令。由按住时长达标的 tick 触发(不等松开),独立
+// goroutine,不再处理任何输入事件(evdev Grab 保持,不 Close)。
 func (this *Daemon) doShutdown() {
 	for i := len(this.interpreters) - 1; i >= 0; i-- {
 		interpreter := this.interpreters[i]
