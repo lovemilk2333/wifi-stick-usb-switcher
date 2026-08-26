@@ -79,24 +79,6 @@
 
 完整示例见 `scripts/test.sh.example`(gdbserver 版本见 `scripts/test-gdbserver.sh.example`)。`tests/virtual-button/virtual_button.py` 是虚拟按键注入工具,用于无实体按键时测试。
 
-systemd 启动(`Type=fork` 不合适,直接前台运行即可):
-
-```ini
-[Unit]
-Description=wifi-stick-usb-switcher
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/usb-switcher daemon --devnode /dev/input/event0 \
-  --led /sys/class/leds/blue:wifi --led /sys/class/leds/red:os --led /sys/class/leds/green:internet \
-  --config-fs /sys/kernel/config/usb_gadget/g1
-
-[Install]
-WantedBy=multi-user.target
-```
-
-LED 节点在开机时可能尚未就绪(systemd 启动时序),daemon 会跳过失败的 LED 继续运行,不会崩溃。
-
 ## 命令行参数
 
 ### `cli daemon [flags]`
