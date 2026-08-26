@@ -51,7 +51,7 @@ type DaemonCmd struct {
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
 	IPCAllowOtherUser    bool             `arg:"--ipc-share, --ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
 	TickRate             time.Duration    `arg:"--tick-rate" default:"50ms" help:"daemon event loop tick rate"`
-	ShutdownThreshold    time.Duration    `arg:"--shutdown-threshold" default:"10s" help:"long-press shutdown threshold, must be greater than --long-tap-threshold; 0 disables"`
+	ShutdownThreshold    time.Duration    `arg:"--shutdown-threshold" default:"5s" help:"long-press shutdown threshold, must be greater than --long-tap-threshold; 0 disables"`
 	ShutdownCommand      string           `arg:"--shutdown-command" default:"poweroff" help:"command run when long-press shutdown triggers"`
 	Shell                string           `arg:"--shell" default:"/bin/bash" help:"shell used to run --shutdown-command, fallback when $SHELL is unset"`
 }
