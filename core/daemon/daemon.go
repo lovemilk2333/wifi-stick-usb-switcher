@@ -169,6 +169,9 @@ func (this *Daemon) Mainloop() error {
 	log.Printf("INFO daemon started\n")
 	for range ticker.C {
 		this.Tick()
+		if this.shutting_down {
+			break // 关机流程(doShutdown 同步执行)已完成,退出主循环
+		}
 	}
 
 	return nil
@@ -428,7 +431,7 @@ func (this *Daemon) Tick() {
 		if st := this.input_device.State(); st != nil && st.Duration >= this.shutdown_threshold {
 			this.shutting_down = true
 			log.Printf("WARN: long-press shutdown triggered\n")
-			go this.doShutdown()
+			this.doShutdown() // 同步执行:完成后 Mainloop 检测 shutting_down 退出进程
 			return
 		}
 	}
@@ -503,8 +506,9 @@ func (this *Daemon) Tick() {
 }
 
 // doShutdown 关机流程:LED 反向(最后至最前)逐颗亮起 500ms 提示,
-// 然后执行关机命令。由按住时长达标的 tick 触发(不等松开),独立
-// goroutine,不再处理任何输入事件(evdev Grab 保持,不 Close)。
+// 然后执行关机命令,完成后调用方(Mainloop)退出进程。由按住时长
+// 达标的 tick 触发(不等松开),同步执行 —— 命令失败(或测试命令)
+// 也要走完退出,不留一个空转的 daemon。
 func (this *Daemon) doShutdown() {
 	var last_interpreter *led.LedInterpreter
 	for _, interpreter := range this.interpreters { // close all first
@@ -543,6 +547,8 @@ func (this *Daemon) doShutdown() {
 	out, err := exec.Command(shell, "-c", this.shutdown_command).CombinedOutput()
 	if err != nil {
 		log.Printf("ERROR: shutdown command failed: %v: %s\n", err, out)
+	} else {
+		log.Printf("INFO shutdown successfully")
 	}
 }
 
@@ -565,6 +571,7 @@ func loadLedInterpreters(ledDevnodes []string) []*led.LedInterpreter {
 			log.Printf("WARN: cannot init LedInterpreter for node `%s`: %s\n", ledDevnode, err)
 			continue
 		}
+		interpreter.Tick() // Tick 无返回值,只刷新状态(SetMode 内部已 act 一次)
 
 		interpreters[index] = interpreter
 	}
