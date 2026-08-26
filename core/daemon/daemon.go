@@ -128,8 +128,10 @@ func (this *Daemon) applyLedState() {
 	if interpreter := this.currentInterpreter(); interpreter != nil {
 		if this.turn_off_leds.Load() {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
+			interpreter.Tick()
 		} else {
 			interpreter.SetMode(this.submodeLedMode())
+			interpreter.Tick()
 		}
 	}
 }
@@ -140,6 +142,14 @@ func (this *Daemon) Mainloop() error {
 	go this.runIpcServer()
 
 	log.Printf("INFO daemon LED init\n")
+	for _, interpreter := range this.interpreters { // close all first
+		if interpreter == nil {
+			continue
+		}
+		interpreter.SetMode(led.MODE_PRESET_OFF)
+		interpreter.Tick()
+	}
+
 	for _, interpreter := range this.interpreters {
 		if interpreter == nil {
 			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
@@ -148,6 +158,7 @@ func (this *Daemon) Mainloop() error {
 		interpreter.Tick()
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
+		interpreter.Tick()
 	}
 
 	ticker := time.NewTicker(this.tick_rate)
@@ -495,15 +506,31 @@ func (this *Daemon) Tick() {
 // 然后执行关机命令。由按住时长达标的 tick 触发(不等松开),独立
 // goroutine,不再处理任何输入事件(evdev Grab 保持,不 Close)。
 func (this *Daemon) doShutdown() {
+	var last_interpreter *led.LedInterpreter
+	for _, interpreter := range this.interpreters { // close all first
+		if interpreter == nil {
+			continue
+		}
+		interpreter.SetMode(led.MODE_PRESET_OFF)
+		interpreter.Tick()
+	}
+
 	for i := len(this.interpreters) - 1; i >= 0; i-- {
 		interpreter := this.interpreters[i]
 		if interpreter == nil {
 			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
 		}
+		last_interpreter = interpreter
 		interpreter.SetMode(led.MODE_PRESET_ON)
 		interpreter.Tick()
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
+		interpreter.Tick()
+	}
+
+	if last_interpreter != nil { // keep last Led on to show if system is powered off
+		last_interpreter.SetMode(led.MODE_PRESET_ON)
+		last_interpreter.Tick()
 	}
 
 	// 优先用环境变量 $SHELL(如 systemd 服务里未设置则为空),
@@ -532,7 +559,8 @@ func loadLedInterpreters(ledDevnodes []string) []*led.LedInterpreter {
 			continue
 		}
 		interpreter := led.NewLedInterpreter(ledDevice)
-		err = interpreter.SetMode(led.MODE_PRESET_OFF)
+		interpreter.SetMode(led.MODE_PRESET_OFF)
+		err = interpreter.Tick()
 		if err != nil {
 			log.Printf("WARN: cannot init LedInterpreter for node `%s`: %s\n", ledDevnode, err)
 			continue

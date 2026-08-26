@@ -101,7 +101,7 @@ func (this *LedInterpreter) GetMode() *LedMode {
 	return this.mode
 }
 
-func (this *LedInterpreter) SetMode(mode *LedMode) error {
+func (this *LedInterpreter) SetMode(mode *LedMode) {
 	actions_length := len(mode.actions)
 	// if actions_length == 0 {
 	// 	return fmt.Errorf("empty mode.actions")
@@ -113,13 +113,11 @@ func (this *LedInterpreter) SetMode(mode *LedMode) error {
 	this.setNextActionTime(time.Time{}) // set to `0`
 	this.loop_count = -1                // the loop `0` will be added when the first act and `mode_action_index` is `0`
 
-	err := this.initMode()
-	if err != nil {
-		log.Printf("WARN: cannot init LedMode when set: %s\n", err)
-		return err
-	}
-
-	return nil
+	// err := this.initMode()
+	// if err != nil {
+	// 	log.Printf("WARN: cannot init LedMode when set: %s\n", err)
+	// 	return err
+	// }
 }
 
 /*
@@ -139,10 +137,12 @@ func (this *LedInterpreter) SkipAction(step ...int) LedModeActionIndex {
 	return this.mode_action_index
 }
 
-func (this *LedInterpreter) Tick() {
-	now := time.Now()
+func (this *LedInterpreter) Tick() error {
+	if !this.init {
+		return this.initMode()
+	}
 
-	this.act(now)
+	return this.act(time.Now())
 }
 
 func (this *LedInterpreter) GetLoopCount() int {
