@@ -1,6 +1,6 @@
 # miruku-wifi-stick-usb-switcher
 
-通过 Wifi Stick上的物理按钮切换 USB Gadget 模式
+通过 Wifi Stick 上的物理按钮切换 USB Gadget 模式,并可通过 IPC 查询/控制
 
 ## 工作原理
 
@@ -9,23 +9,48 @@
                                                                         │
                                                         RNDIS: 建 rndis 函数 → 绑 UDC → ip addr → dnsmasq DHCP
                                                         ADB:   挂载 functionfs → 启动 adbd
+                                                        IPC:   unix socket(/tmp/<ident>.sock),cli ipc 子命令
 ```
 
-- 模式列表:`[RNDIS, ADB]`。**短按**前进到下一个模式,**长按**退回到上一个模式,切换即应用。
-- 每次切换都会:清空现有函数 → 添加新模式函数 → 应用 → 更新 gadget,并把对应位置的 LED 点亮。
-- RNDIS 模式下 daemon 自行管理网络:让 NetworkManager 放弃该接口、配置 `--rndis-ip`、在接口上启动 dnsmasq 作为 DHCP 服务器。
+- 模式列表:`[RNDIS, ADB]`。**短按**前进到下一个模式,**长按**进入/退出子模式选择(选择中短按切换子模式),切换即应用。
+- 每次模式切换都会:清空现有函数 → 添加新模式函数 → 应用 → 更新 gadget。
+- RNDIS 模式下 daemon 自行管理网络:让 NetworkManager 放弃该接口、按子模式配置网络(RNDIS 子模式见下节)。
+- daemon 主循环与 IPC server 相互独立:IPC 异常会自动重建,不影响设备功能。
 
 ## 按键行为
 
-| 事件              | 触发条件                                      | 默认行为         |
-| :---------------- | :-------------------------------------------- | :--------------- |
-| 短按 tap          | 按下时间 < `--long-tap-threshold`(500ms)      | 切换到下一个模式 |
-| 长按 long-tap     | 按下时间 ≥ `--long-tap-threshold`             | 切换到上一个模式 |
-| 连击 multiple-tap | `--multiple-tap-threshold`(500ms)内的连续 tap | 预留(TODO)       |
+| 事件              | 触发条件                                        | 默认行为                                                        |
+| :---------------- | :---------------------------------------------- | :-------------------------------------------------------------- |
+| 短按 tap          | 按下时间 < `--long-tap-threshold`(500ms)        | 未在选择中:切换到下一个模式;子模式选择中:切换子模式             |
+| 长按 long-tap     | 按下时间 ≥ `--long-tap-threshold`               | 进入/退出子模式选择,LED 先关闭 `--submode-led-duration`(750ms) 提示 |
+| 连击 multiple-tap | `--multiple-tap-threshold`(500ms)内的连续 tap   | 预留(TODO)                                                     |
 
 - `--long-tap-immediately`(默认开启):按下时间一到阈值立即上报长按,无需等松开。
 - `--multiple-tap-threshold` 设为负数可禁用连击。
 - `--auto-confirm-threshold`(5s)已声明,尚未使用(预留)。
+
+## 模式与子模式
+
+模式(`RNDIS` / `ADB`)内部有子模式(submode),仅内存状态,切换子模式时**不重建 gadget**(重建会断开对端 RNDIS 网卡,Windows 侧需要重新枚举、ICS 重新就绪),直接在当前接口上重配网络。
+
+| 模式  | 子模式 | 行为                                                          |
+| :---- | :----- | :------------------------------------------------------------ |
+| RNDIS | 0(默认) | 网关模式:接口配 `--rndis-ip`,启动 dnsmasq 作 DHCP 服务器     |
+| RNDIS | 1       | 从模式:udhcpc 探测上游 DHCP → 按 `--rndis-client-ip` 模板配客户端 IP + 默认路由,上游 DNS 直写 `/etc/resolv.conf`(离开时还原) |
+| ADB   | 0       | ADB 模式,无子模式                                            |
+
+- 从模式探测失败(网卡未就绪、非连续掩码、前缀 ≥ /30)自动回退网关模式,保证 stick 始终可达。
+- 子模式通过 `MaxSubmode()` 有界循环(`RNDIS` 0↔1),`enable()` 只会看到合法值。
+
+## LED 显示
+
+| 状态                     | 行为                                                                 |
+| :----------------------- | :------------------------------------------------------------------- |
+| 模式切换                 | 快闪(`--led-blink-duration` on / `--led-blink-interval` off)        |
+| 进入/退出子模式选择      | LED 先关闭 `--submode-led-duration` 提示,结束后显示子模式状态        |
+| 子模式切换(选择中短按)  | LED 关闭                                                             |
+| 子模式状态               | 0 → 常亮;1 → 慢闪(500ms on / 500ms off)                             |
+| `cli ipc toggle-led`     | 1 关闭所有 LED(立即生效,不等待下一次模式切换);2 恢复                |
 
 ## 构建
 
@@ -54,11 +79,27 @@
 
 完整示例见 `scripts/test.sh.example`(gdbserver 版本见 `scripts/test-gdbserver.sh.example`)。`tests/virtual-button/virtual_button.py` 是虚拟按键注入工具,用于无实体按键时测试。
 
+systemd 启动(`Type=fork` 不合适,直接前台运行即可):
+
+```ini
+[Unit]
+Description=wifi-stick-usb-switcher
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/usb-switcher daemon --devnode /dev/input/event0 \
+  --led /sys/class/leds/blue:wifi --led /sys/class/leds/red:os --led /sys/class/leds/green:internet \
+  --config-fs /sys/kernel/config/usb_gadget/g1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+LED 节点在开机时可能尚未就绪(systemd 启动时序),daemon 会跳过失败的 LED 继续运行,不会崩溃。
+
 ## 命令行参数
 
-```
-cli daemon [flags]
-```
+### `cli daemon [flags]`
 
 | 参数                       | 默认值                             | 说明                                              |
 | :------------------------- | :--------------------------------- | :------------------------------------------------ |
@@ -68,19 +109,58 @@ cli daemon [flags]
 | `--multiple-tap-threshold` | `500ms`                            | 连击阈值,< 0 禁用                                 |
 | `--auto-confirm-threshold` | `5s`                               | 预留,未使用                                       |
 | `-l, --led`                | —                                  | LED 节点,可重复,如 `-l /sys/class/leds/blue:wifi` |
+| `--led-blink-duration`     | `100ms`                            | 模式切换快闪的亮时长                              |
+| `--led-blink-interval`     | `300ms`                            | 模式切换快闪的灭时长                              |
+| `--submode-led-duration`   | `750ms`                            | 进入/退出子模式选择时 LED 的关闭提示时长           |
 | `-c, --config-fs`          | `/sys/kernel/config/usb_gadget/g1` | configfs 路径(不存在时由 `gc -a` 创建)            |
 | `-g, --gc-path`            | `gc`                               | HandsomeMod `gc` 工具路径或 `$PATH` 中的可执行名  |
 | `--rndis-device-mac`       | `02:12:34:56:78:9a`                | 设备侧 RNDIS 接口 MAC                             |
 | `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                  |
 | `-a, --rndis-ip`           | `10.22.33.1/24`                    | RNDIS 接口 IP(带前缀),DHCP 池由此自动推导         |
+| `--rndis-client-ip`        | `0.0.0.33`                         | 从模式客户端 IP 模板,0 字节取上游网段字节          |
+| `--rndis-client-timeout`   | `5s`                               | 从模式总超时(等网卡 + DHCP 探测)                  |
 | `-i, --rndis-ifname`       | `usb0`                             | RNDIS 接口名,`ip link` 可查                       |
+| `--rndis-qmult`            | `8`                                | usb ifname qmult(队列长度乘数),0 不写             |
 | `--rndis-serial-number`    | `wifi-stick-miruku`                | RNDIS 模式的 USB 序列号字符串                     |
 | `--rndis-manufacturer`     | `wifi-stick`                       | RNDIS 模式的制造商字符串                          |
 | `--rndis-product`          | `RNDIS Ethernet`                   | RNDIS 模式的产品字符串                            |
 | `--adb-serial-number`      | `wifi-stick-miruku`                | ADB 模式的 USB 序列号字符串                       |
-| `--adb-manufacturer`       | `Google`                           | ADB 模式的制造商字符串                            |
+| `--adb-manufacturer`       | `Google`                           | ADB 模式的产品字符串                              |
 | `--adb-product`            | `ADB Gadget`                       | ADB 模式的产品字符串                              |
+| `--adb-env`                | `TERM=xterm-256color`              | adbd 附加环境变量,可重复                          |
 | `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                   |
+| `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)        |
+| `--tick-rate`              | `50ms`                             | daemon 事件循环 tick 间隔                          |
+
+### `cli ipc <command> [args]`
+
+通过 unix socket(`/tmp/<PROJECT_IDENT>.sock`)与 daemon 交互。
+
+| 命令        | 参数   | 说明                          | 输出       |
+| :---------- | :----- | :---------------------------- | :--------- |
+| `toggle-led` | `0`    | 查询当前 LED 状态             | `led: on` / `led: off` |
+| `toggle-led` | `1`    | 关闭 LED(立即生效)           | `led: off` |
+| `toggle-led` | `2`    | 开启 LED(立即生效)           | `led: on`  |
+
+| 参数                 | 默认值 | 说明                              |
+| :------------------- | :----- | :-------------------------------- |
+| `-t, --timeout`      | `10s`  | 等待 IPC 响应超时                 |
+| `--connect-timeout`  | `5s`   | 连接与握手超时                    |
+| `--dial-retry`       | `1s`   | 连接重试间隔                      |
+
+```bash
+./cli ipc toggle-led 0   # 查询
+./cli ipc toggle-led 1   # 关灯
+./cli ipc toggle-led 2   # 开灯
+```
+
+`cli version` 输出编译信息(`CommitHash` / `BuildTime`)。
+
+## IPC 说明
+
+- 连接不加密(daemon 端 `ServerConfig` 零值,cli 端显式对齐,否则握手必失败)。
+- golang-ipc 库的 server 是一次性的:一次握手失败(旧 cli 二进制、cli 半途退出)会关闭 listener。daemon 用 supervisor 循环重建,任何时刻都尽量提供服务;cli 侧也先等握手完成(`Connected`)再发请求,不再撞 `Connecting` 竞态。
+- 握手失败/连接异常只影响 IPC,daemon 主循环(按键、LED、USB)不受影响。
 
 ## dnsmasq 自定义
 
@@ -114,13 +194,17 @@ cli daemon [flags]
 - **`gc -l` 是只读的**:它是 configfs 的只读快照,不会解绑;而 `gc -a/-c/-e/-d/-r` 每次调用末尾都会解绑 gadget。解析以 tab 分隔键值(键里没有 tab,值里可以有空格,`Serial Number` 键本身也含空格)。
 - **configfs 不能创建文件**:写一个不存在的属性路径返回 EACCES,写入必须是 `exist_only` 语义(先 stat 再写)。
 - **NetworkManager 让位**:向 `/etc/NetworkManager/conf.d/<PROJECT_IDENT>.conf` 写持久 unmanaged 配置(NM 启动加载早于 usb0 出现,注册即 unmanaged),写入后 SIGHUP 重载并校验,失效时用 `nmcli device set ... managed no` 兜底;NM 接管时会把 usb0 当 DHCP client,永远拿不到地址还会清掉配置的 IP。
+- **从模式 DNS 直写 `/etc/resolv.conf`**:resolvconf tail 方案在该设备无效(resolv.conf 不重新聚合),改为写前备份原状(symlink 也处理)、离开从模式时还原。已知限制:NetworkManager 重写 resolv.conf 会覆盖条目。
 - **进程管理**:adbd 和 dnsmasq 都通过 pid 文件 + `/proc/<pid>/cmdline` 校验来追踪,pid 复用也不会误杀无关进程;不会无差别 killall。
+- **LED 失败容错**:LED 节点初始化失败(systemd 开机时序 sysfs 未就绪)时该槽位留 nil,所有遍历判空跳过,daemon 照常运行。
+- **子模式有界**:`UsbGadgetFunction` 暴露 `MaxSubmode()`(`RNDIS`=1),切换用 `(submode+1) % (MaxSubmode()+1)` 循环,防止无限递增撞上 `enable()` 不认识的值。
 
 ## 目录结构
 
 ```
-cmd/cli.go              # CLI 入口(go-arg,daemon 子命令)
-core/daemon.go          # 守护进程主循环、模式切换
+cmd/cli.go              # CLI 入口(go-arg:daemon / ipc / version 子命令)
+core/daemon/            # 守护进程主循环、模式切换、IPC supervisor
+core/daemonipc/         # 反射式 IPC 框架(handler 分发 / payload 解析)
 core/input/             # evdev 按键读取与 tap/long-tap/multiple-tap 语义
 core/led/               # LED 状态显示
 core/usb/               # USB gadget 控制器(configfs)与 RNDIS / ADB 功能
