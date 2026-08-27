@@ -3,6 +3,7 @@ package typeinject
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"testing"
@@ -549,6 +550,124 @@ func TestDepInjectAllNilArgs(t *testing.T) {
 	}
 	if len(converted) != 0 {
 		t.Fatalf("expected empty result for all-nil args, got %v", converted)
+	}
+}
+
+func TestCallFunctionBasic(t *testing.T) {
+	fn := func(a string, b int, c float64) string {
+		return fmt.Sprintf("%s:%d:%v", a, b, c)
+	}
+	res, err := CallFunction(fn, []any{"x", json.Number("5"), json.Number("1.5")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res[0].Interface().(string) != "x:5:1.5" {
+		t.Fatalf("unexpected %v", res[0].Interface())
+	}
+}
+
+func TestCallFunctionWithStatic(t *testing.T) {
+	fn := func(ctx string, name string) string { return ctx + ":" + name }
+	res, err := CallFunction(fn, []any{"bob"}, "ctx")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res[0].Interface().(string) != "ctx:bob" {
+		t.Fatalf("unexpected %v", res[0].Interface())
+	}
+}
+
+func TestCallFunctionStructArg(t *testing.T) {
+	fn := func(c validationConfig) string { return c.Name }
+
+	// invalid struct (bad email / port out of range) => validation error
+	if _, err := CallFunction(fn, []any{validationConfig{Name: "x", Email: "bad", Port: 99999, Protocol: "tcp"}}); err == nil {
+		t.Fatal("expected validation error for invalid struct")
+	}
+
+	res, err := CallFunction(fn, []any{validationConfig{Name: "x", Email: "a@b.com", Port: 80, Protocol: "tcp"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res[0].Interface().(string) != "x" {
+		t.Fatalf("unexpected %v", res[0].Interface())
+	}
+}
+
+func TestCallFunctionJSONBasic(t *testing.T) {
+	fn := func(a string, b int, c float64) (string, int, float64) {
+		return a, b, c
+	}
+	data := []byte(`["hello", 7, 2.25]`)
+	res, err := CallFunctionJSON(fn, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res[0].Interface().(string) != "hello" || res[1].Interface().(int) != 7 || res[2].Interface().(float64) != 2.25 {
+		t.Fatalf("unexpected %v", res)
+	}
+}
+
+func TestCallFunctionJSONStructArg(t *testing.T) {
+	fn := func(c validationConfig) string { return c.Name }
+
+	good := []byte(`[{"Name":"svc","Email":"a@b.com","Port":80,"Protocol":"tcp"}]`)
+	res, err := CallFunctionJSON(fn, good)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res[0].Interface().(string) != "svc" {
+		t.Fatalf("unexpected %v", res[0].Interface())
+	}
+
+	// invalid struct from JSON object => validation error
+	bad := []byte(`[{"Name":"","Email":"bad","Port":99999,"Protocol":"tcp"}]`)
+	if _, err := CallFunctionJSON(fn, bad); err == nil {
+		t.Fatal("expected validation error for invalid struct from JSON")
+	}
+}
+
+func TestCallFunctionJSONLengthMismatch(t *testing.T) {
+	fn := func(a int) int { return a }
+	if _, err := CallFunctionJSON(fn, []byte(`[1, 2]`)); err == nil {
+		t.Fatal("expected length mismatch error")
+	}
+	if _, err := CallFunctionJSON(fn, []byte(`[]`)); err == nil {
+		t.Fatal("expected length mismatch error for empty payload")
+	}
+}
+
+func TestCallFunctionJSONWithStatic(t *testing.T) {
+	type ctx struct{ id int }
+	fn := func(c *ctx, name string) string { return fmt.Sprintf("%d:%s", c.id, name) }
+
+	data := []byte(`["bob"]`)
+	res, err := CallFunctionJSON(fn, data, &ctx{id: 9})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res[0].Interface().(string) != "9:bob" {
+		t.Fatalf("unexpected %v", res[0].Interface())
+	}
+}
+
+func TestParseJsonPayload(t *testing.T) {
+	fn := func(a int, b string) (int, string) { return a, b }
+	out, err := ParseJsonPayload(fn, []byte(`[42, "hi"]`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out[0].(int) != 42 || out[1].(string) != "hi" {
+		t.Fatalf("unexpected %v", out)
+	}
+
+	// number type coercion: json.Number "7" -> int8
+	out, err = ParseJsonPayload(fn, []byte(`[7, "x"]`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out[0].(int) != 7 {
+		t.Fatalf("unexpected %v", out)
 	}
 }
 

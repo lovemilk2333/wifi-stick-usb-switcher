@@ -129,7 +129,7 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 	var converted reflect.Value
 
 	switch {
-	// 模式 1：FIELD_TYPE_VALIDATION_STRUCT，整个结构体直接丢给 go-validator 校验
+	// Mode 1: VALIDATION_STRUCT, validate the whole struct via go-validator
 	case MetadataHasType(meta.FieldType, FIELD_TYPE_VALIDATION_STRUCT):
 		if !argv_value.CanConvert(meta.Type) {
 			return nil, fmt.Errorf("cannot convert `%s` to `%s`", argv_value.Type().Name(), meta.Type.Name())
@@ -142,7 +142,7 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 
 		converted = converted_value
 		result = converted_value.Interface()
-	// 模式 2：FIELD_TYPE_RECURSION，逐个子字段处理
+	// Mode 2: RECURSION, process child fields one by one
 	case MetadataHasType(meta.FieldType, FIELD_TYPE_RECURSION):
 		if argv_value.Kind() != reflect.Struct {
 			return nil, fmt.Errorf("invalid value type: expect `Struct`, got `%s`", argv_value.Type().Name())
@@ -159,7 +159,7 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 				continue
 			}
 
-			// 单字段具有 validation tag 时的逻辑
+			// Per-field validation tag handling
 			if MetadataHasType(child_meta.FieldType, FIELD_TYPE_VALIDATION_FIELD) {
 				validate_tag := strings.TrimSpace(child_meta.StructField.Tag.Get(VALIDATION_TAG))
 				if validate_tag != "" && validate_tag != "-" {
@@ -169,7 +169,7 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 				}
 			}
 
-			// 深度递归处理子元数据（如果存在），否则直接转换当前字段
+			// Deep-recurse child metadata if present, else convert the field
 			value, err := ConvertArgv(child_meta, field_value.Interface())
 			if err != nil {
 				return nil, err

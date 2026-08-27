@@ -1,19 +1,16 @@
 package daemonipc
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"math"
-	"strings"
-
-	// "math"
 	"reflect"
+	"strings"
 	"sync"
 
 	ipc "github.com/james-barrow/golang-ipc"
+
+	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/typeinject"
 )
 
 /*
@@ -57,7 +54,7 @@ type IPCImpl interface {
 }
 
 // shared between client and server
-var handler_structs = make(map[IPCPackageType][]reflect.Type)
+var handler_structs = make(map[IPCPackageType]typeinject.DepInjectFieldMetadatas)
 
 type IPCFramework struct {
 	handlers map[IPCPackageType]IPCFrameworkHandler
@@ -106,7 +103,7 @@ func (this *IPCFramework) mainloop() {
 	for {
 		msg, err := this.ipc_impl.Read()
 		if err != nil {
-			// Read 出错后库会关闭通道,再读只会无限报同样的错,直接退出
+			// After a Read error the channel is closed; further reads repeat it, so exit.
 			log.Printf("WARN: package cannot receive: %v", err)
 			break
 		}
@@ -123,7 +120,7 @@ func (this *IPCFramework) mainloop() {
 	}
 }
 
-func (this *IPCFramework) get_payload_struct_by_handler(function any) ([]reflect.Type, error) {
+func (this *IPCFramework) get_payload_struct_by_handler(function any) (typeinject.DepInjectFieldMetadatas, error) {
 	if function == nil {
 		return nil, fmt.Errorf("`function` cannot be nil")
 	}
@@ -133,136 +130,26 @@ func (this *IPCFramework) get_payload_struct_by_handler(function any) ([]reflect
 		return nil, fmt.Errorf("`function` is not a function")
 	}
 
-	arg_count := type_.NumIn()
-	if arg_count < 1 {
-		return nil, fmt.Errorf("`function` must have more than (equals) 1 args")
-	}
-
 	if !type_.In(0).AssignableTo(reflect.TypeFor[*IPCFramework]()) {
 		return nil, fmt.Errorf("`function`'s first argv must be `*IPCFramework`")
 	}
 
-	payload_struct := make([]reflect.Type, 0, arg_count-1)
-	for i := 1; i < arg_count; i++ {
-		payload_struct = append(payload_struct, type_.In(i))
-	}
-
-	return payload_struct, nil
-}
-
-const FLOAT64_MIN_EXACT_INT = -1 << 53
-const FLOAT64_MAX_EXACT_INT = 1 << 53
-
-func (this *IPCFramework) payload_handle_number(value json.Number, target reflect.Type) (reflect.Value, error) {
-	kind := target.Kind()
-	value_int, int_err := value.Int64()
-	valid_int := int_err == nil
-
-	switch kind {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if !valid_int {
-			return reflect.Value{}, fmt.Errorf("value is not integer")
-		}
-		if target.OverflowInt(value_int) {
-			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
-		}
-
-		return reflect.ValueOf(value_int).Convert(target), nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if !valid_int {
-			return reflect.Value{}, fmt.Errorf("value is not a integer")
-		}
-
-		if value_int < 0 {
-			return reflect.Value{}, fmt.Errorf("negative value for %s", target.Name())
-		}
-
-		if target.OverflowUint(uint64(value_int)) {
-			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
-		}
-
-		return reflect.ValueOf(value_int).Convert(target), nil
-	case reflect.Float32, reflect.Float64:
-		value_float, _ := value.Float64()
-		if math.IsNaN(value_float) || math.IsInf(value_float, 0) {
-			return reflect.Value{}, fmt.Errorf("value is inf or nan")
-		}
-
-		if target.OverflowFloat(value_float) {
-			return reflect.Value{}, fmt.Errorf("value overflowed for %s", target.Name())
-		}
-
-		return reflect.ValueOf(value_float).Convert(target), nil
-	default:
-		return reflect.Value{}, fmt.Errorf("target type is not a number type (got %s)", target.Name())
-	}
-}
-
-func (this *IPCFramework) parse_payload(payload_struct []reflect.Type, payload_original []any) ([]reflect.Value, error) {
-	payload_length := len(payload_original)
-	if payload_length != len(payload_struct) {
-		return nil, fmt.Errorf("invalid payload length: expected %d args, but got %d", len(payload_struct), len(payload_original))
-	}
-
-	error_count := 0
-	message := ""
-	payload := make([]reflect.Value, 0, payload_length)
-
-	for index, type_ := range payload_struct {
-		value := payload_original[index]
-
-		if value == nil {
-			if type_.Kind() != reflect.Interface && type_.Kind() != reflect.Pointer {
-				message += fmt.Sprintf("arg %d: expected %v, but got nil", index, type_)
-				error_count++
-			}
-			continue
-		}
-
-		actual_type := reflect.TypeOf(value)
-
-		// 注意:number 变量 shadow 原始 value,else 分支必须用回原始
-		// value —— 曾误用 shadow 的零值 json.Number 做 Convert 而 panic
-		if number, ok := value.(json.Number); ok {
-			val, err := this.payload_handle_number(number, type_)
-			if err != nil {
-				message += err.Error()
-				error_count++
-				continue
-			}
-			payload = append(payload, val)
-		} else if !actual_type.AssignableTo(type_) {
-			message += fmt.Sprintf("invalid payload arg `%d`: excepted type %s, but got %s: %v", index, type_, actual_type, value)
-			error_count++
-			continue
-		} else { // valid type
-			payload = append(payload, reflect.ValueOf(value).Convert(type_))
-		}
-	}
-
-	if error_count > 0 {
-		return nil, errors.New(message)
-	} else {
-		return payload, nil
-	}
-}
-
-func (this *IPCFramework) parse_data(payload_struct []reflect.Type, data []byte) ([]reflect.Value, error) {
-	var payload_original []any
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	err := decoder.Decode(&payload_original)
+	metas, err := typeinject.GetStructByFunctionType(type_, reflect.TypeFor[*IPCFramework]())
 	if err != nil {
 		return nil, err
 	}
 
-	payload, err := this.parse_payload(payload_struct, payload_original)
+	// payload metas exclude the static *IPCFramework first argument
+	return metas[1:], nil
+}
+
+func (this *IPCFramework) parse_data(metas typeinject.DepInjectFieldMetadatas, data []byte) ([]reflect.Value, error) {
+	payload, err := typeinject.ParseJsonPayloadWithMetas(metas, data)
 	if err != nil {
 		return nil, err
 	}
 
-	return payload, nil
+	return typeinject.Args2values(payload), nil
 }
 
 func (this *IPCFramework) check_data(package_type IPCPackageType, data []byte) error {
@@ -317,7 +204,7 @@ func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) 
 		goto handle_resp
 	}
 
-	payload, err = this.parse_data(payload_struct, data)
+	payload, err = this.parse_data(this.GetPayloadStruct(package_type), data)
 	if err != nil {
 		if fallback_handler == nil {
 			return fmt.Errorf("package cannot parse payload: no payload struct for `%d`: %w", package_type, err)
@@ -429,7 +316,7 @@ func (this *IPCFramework) SendRaw(package_type IPCPackageType, non_converted_pay
 
 	payload := make([]any, len(non_converted_payload))
 	for index, value := range non_converted_payload {
-		if payload_struct[index].Kind() == reflect.String {
+		if payload_struct[index].Type.Kind() == reflect.String {
 			// keep original if the target type is string
 			payload[index] = value
 			continue
@@ -520,7 +407,7 @@ func (this *IPCFramework) GetHandler(package_type IPCPackageType) IPCFrameworkHa
 	return this.handlers[package_type]
 }
 
-func (this *IPCFramework) GetPayloadStruct(package_type IPCPackageType) []reflect.Type {
+func (this *IPCFramework) GetPayloadStruct(package_type IPCPackageType) typeinject.DepInjectFieldMetadatas {
 	return handler_structs[package_type]
 }
 
