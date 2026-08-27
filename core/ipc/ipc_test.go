@@ -81,18 +81,23 @@ func TestListCommands(t *testing.T) {
 
 func TestBuildTap(t *testing.T) {
 	cases := []struct {
-		name     string
-		args     []string
-		expected daemonipc.SimulateButtonTarget
-		wantErr  bool
+		name      string
+		args      []string
+		expected  daemonipc.SimulateButtonTarget
+		expectCnt int
+		wantErr   bool
 	}{
-		{"no arg -> tap", nil, daemonipc.SIMULATE_BUTTON_TAP, false},
-		{"empty -> tap", []string{""}, daemonipc.SIMULATE_BUTTON_TAP, false},
-		{"- -> tap", []string{"-"}, daemonipc.SIMULATE_BUTTON_TAP, false},
-		{"tap -> tap", []string{"tap"}, daemonipc.SIMULATE_BUTTON_TAP, false},
-		{"long -> long", []string{"long"}, daemonipc.SIMULATE_BUTTON_LONG, false},
-		{"shutdown -> shutdown", []string{"shutdown"}, daemonipc.SIMULATE_BUTTON_SHUTDOWN, false},
-		{"bad -> error", []string{"bogus"}, 0, true},
+		{"no arg -> tap", nil, daemonipc.SIMULATE_BUTTON_TAP, 0, false},
+		{"empty -> tap", []string{""}, daemonipc.SIMULATE_BUTTON_TAP, 0, false},
+		{"- -> tap", []string{"-"}, daemonipc.SIMULATE_BUTTON_TAP, 0, false},
+		{"tap -> tap", []string{"tap"}, daemonipc.SIMULATE_BUTTON_TAP, 0, false},
+		{"long -> long", []string{"long"}, daemonipc.SIMULATE_BUTTON_LONG, 0, false},
+		{"shutdown -> shutdown", []string{"shutdown"}, daemonipc.SIMULATE_BUTTON_SHUTDOWN, 0, false},
+		{"multi 3", []string{"multi", "3"}, daemonipc.SIMULATE_BUTTON_MULTI, 3, false},
+		{"multi no count -> error", []string{"multi"}, 0, 0, true},
+		{"multi 1 -> error", []string{"multi", "1"}, 0, 0, true},
+		{"multi bad -> error", []string{"multi", "x"}, 0, 0, true},
+		{"bad -> error", []string{"bogus"}, 0, 0, true},
 	}
 
 	for _, c := range cases {
@@ -108,7 +113,10 @@ func TestBuildTap(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if payload[0].(daemonipc.SimulateButtonTarget) != c.expected {
-				t.Fatalf("expected %v, got %v", c.expected, payload[0])
+				t.Fatalf("expected target %v, got %v", c.expected, payload[0])
+			}
+			if payload[1].(int) != c.expectCnt {
+				t.Fatalf("expected count %d, got %v", c.expectCnt, payload[1])
 			}
 		})
 	}

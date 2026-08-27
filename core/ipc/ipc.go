@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,21 +115,31 @@ func init() {
 	RegisterHandler(daemonipc.PACKAGE_SIMULATE_BUTTON, buildTap)
 }
 
-// buildTap maps a CLI subcommand to a SimulateButtonTarget.
-func buildTap(action string) ([]any, error) {
+// buildTap maps a CLI subcommand to a SimulateButtonTarget (+ count for multi).
+func buildTap(action string, count string) ([]any, error) {
 	action = strings.ToLower(strings.TrimSpace(action))
-	var target daemonipc.SimulateButtonTarget
 	switch action {
 	case "", "-", "tap":
-		target = daemonipc.SIMULATE_BUTTON_TAP
+		return []any{daemonipc.SIMULATE_BUTTON_TAP, 0}, nil
 	case "long":
-		target = daemonipc.SIMULATE_BUTTON_LONG
+		return []any{daemonipc.SIMULATE_BUTTON_LONG, 0}, nil
 	case "shutdown":
-		target = daemonipc.SIMULATE_BUTTON_SHUTDOWN
+		return []any{daemonipc.SIMULATE_BUTTON_SHUTDOWN, 0}, nil
+	case "multi":
+		if strings.TrimSpace(count) == "" {
+			return nil, fmt.Errorf("multi requires a count: ipc tap multi <n>")
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(count))
+		if err != nil {
+			return nil, fmt.Errorf("invalid multi count %q (must be an integer)", count)
+		}
+		if n < 2 {
+			return nil, fmt.Errorf("multi-tap count must be >= 2")
+		}
+		return []any{daemonipc.SIMULATE_BUTTON_MULTI, n}, nil
 	default:
-		return nil, fmt.Errorf("invalid tap action %q (use tap/long/shutdown)", action)
+		return nil, fmt.Errorf("invalid tap action %q (use tap/long/shutdown/multi)", action)
 	}
-	return []any{target}, nil
 }
 
 // buildToggleLed maps a CLI state string to a ToggleLEDTarget.

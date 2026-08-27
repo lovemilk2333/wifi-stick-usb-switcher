@@ -7,7 +7,7 @@ import (
 type daemonInterface interface {
 	GetTurnOffLeds() bool
 	SetTurnOffLeds(off bool)
-	SimulateButton(target SimulateButtonTarget)
+	SimulateButton(target SimulateButtonTarget, count int) error
 }
 
 func InitServer(daemon daemonInterface) *IPCFramework {
@@ -70,8 +70,16 @@ func InitServer(daemon daemonInterface) *IPCFramework {
 
 	IPCServer.RegisterHandler(
 		PACKAGE_SIMULATE_BUTTON,
-		func(this *IPCFramework, target SimulateButtonTarget) (*IPCPackage, error) {
-			daemon.SimulateButton(target)
+		func(this *IPCFramework, target SimulateButtonTarget, count int) (*IPCPackage, error) {
+			err := daemon.SimulateButton(target, count)
+			if err != nil {
+				// respond with the error message instead of a Go error so the
+				// client still receives a package and does not time out
+				return &IPCPackage{
+					Type:    PACKAGE_SIMULATE_BUTTON_RESP,
+					Payload: []any{"error: " + err.Error()},
+				}, nil
+			}
 			return &IPCPackage{
 				Type: PACKAGE_SIMULATE_BUTTON_RESP,
 				Payload: []any{

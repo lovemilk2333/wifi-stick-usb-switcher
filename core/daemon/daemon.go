@@ -123,8 +123,9 @@ func (this *Daemon) GetTurnOffLeds() bool {
 // SimulateButton injects a synthetic button action, reusing the physical-button
 // path: tap/long push an event into the input queue (processed by Tick on the
 // mainloop, no shared-state race); shutdown simulates a held button long enough
-// for the mainloop's shutdown check to fire doShutdown.
-func (this *Daemon) SimulateButton(target daemonipc.SimulateButtonTarget) {
+// for the mainloop's shutdown check to fire doShutdown; multi injects `count`
+// taps that the input chain-merge turns into a single INPUT_MULTIPLE_TAP.
+func (this *Daemon) SimulateButton(target daemonipc.SimulateButtonTarget, count int) error {
 	now := time.Now()
 	switch target {
 	case daemonipc.SIMULATE_BUTTON_TAP:
@@ -147,7 +148,24 @@ func (this *Daemon) SimulateButton(target daemonipc.SimulateButtonTarget) {
 			d = time.Second // shutdown disabled: still simulate a long press
 		}
 		this.input_device.InjectPress(d + time.Second)
+	case daemonipc.SIMULATE_BUTTON_MULTI:
+		if count < 2 {
+			return fmt.Errorf("multi-tap count must be >= 2")
+		}
+		max := int(this.input_device.Config.MultipleTapMaxCount)
+		if max > 0 && count > max {
+			return fmt.Errorf("multi-tap count %d exceeds maximum %d", count, max)
+		}
+		for i := 0; i < count; i++ {
+			this.input_device.InjectEvent(&input.InputEvent{
+				Type:     input.INPUT_TAP,
+				Time:     now,
+				TapCount: 1,
+				Status:   input.DEVICE_STATUS_NORMAL,
+			})
+		}
 	}
+	return nil
 }
 
 func (this *Daemon) SetTurnOffLeds(off bool) {

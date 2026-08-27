@@ -29,6 +29,7 @@ const (
 	SIMULATE_BUTTON_TAP      SimulateButtonTarget = iota // short click
 	SIMULATE_BUTTON_LONG                                 // long press (enter/exit submode)
 	SIMULATE_BUTTON_SHUTDOWN                             // long-press shutdown
+	SIMULATE_BUTTON_MULTI                                // multi-tap (n clicks)
 )
 
 // SimulateButtonActionName returns the human-readable name of a target.
@@ -40,6 +41,8 @@ func (this SimulateButtonTarget) SimulateButtonActionName() string {
 		return "long"
 	case SIMULATE_BUTTON_SHUTDOWN:
 		return "shutdown"
+	case SIMULATE_BUTTON_MULTI:
+		return "multi"
 	default:
 		return "unknown"
 	}
