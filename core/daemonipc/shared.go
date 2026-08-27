@@ -7,8 +7,10 @@ const (
 	// PACKAGE_QUERY_PAYLOAD          IPCPackageType = 2
 	PACKAGE_INVALID_PAYLOAD IPCPackageType = 3
 
-	PACKAGE_TOGGLE_LED      IPCPackageType = 1024
-	PACKAGE_TOGGLE_LED_RESP IPCPackageType = 1025
+	PACKAGE_TOGGLE_LED         IPCPackageType = 1024
+	PACKAGE_TOGGLE_LED_RESP    IPCPackageType = 1025
+	PACKAGE_SIMULATE_BUTTON    IPCPackageType = 1026
+	PACKAGE_SIMULATE_BUTTON_RESP IPCPackageType = 1027
 )
 
 type ToggleLEDTarget uint8
@@ -18,3 +20,27 @@ const (
 	TOGGLE_LED_OFF
 	TOGGLE_LED_ON
 )
+
+// SimulateButtonTarget selects which synthetic button action an IPC "tap"
+// command triggers.
+type SimulateButtonTarget uint8
+
+const (
+	SIMULATE_BUTTON_TAP      SimulateButtonTarget = iota // short click
+	SIMULATE_BUTTON_LONG                                 // long press (enter/exit submode)
+	SIMULATE_BUTTON_SHUTDOWN                             // long-press shutdown
+)
+
+// SimulateButtonActionName returns the human-readable name of a target.
+func (this SimulateButtonTarget) SimulateButtonActionName() string {
+	switch this {
+	case SIMULATE_BUTTON_TAP:
+		return "tap"
+	case SIMULATE_BUTTON_LONG:
+		return "long"
+	case SIMULATE_BUTTON_SHUTDOWN:
+		return "shutdown"
+	default:
+		return "unknown"
+	}
+}

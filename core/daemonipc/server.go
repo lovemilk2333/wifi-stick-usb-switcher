@@ -7,6 +7,7 @@ import (
 type daemonInterface interface {
 	GetTurnOffLeds() bool
 	SetTurnOffLeds(off bool)
+	SimulateButton(target SimulateButtonTarget)
 }
 
 func InitServer(daemon daemonInterface) *IPCFramework {
@@ -58,10 +59,23 @@ func InitServer(daemon daemonInterface) *IPCFramework {
 				daemon.SetTurnOffLeds(false)
 			}
 
+		return &IPCPackage{
+			Type: PACKAGE_TOGGLE_LED_RESP,
+			Payload: []any{ // Off or not
+				daemon.GetTurnOffLeds(),
+			},
+		}, nil
+	},
+)
+
+	IPCServer.RegisterHandler(
+		PACKAGE_SIMULATE_BUTTON,
+		func(this *IPCFramework, target SimulateButtonTarget) (*IPCPackage, error) {
+			daemon.SimulateButton(target)
 			return &IPCPackage{
-				Type: PACKAGE_TOGGLE_LED_RESP,
-				Payload: []any{ // Off or not
-					daemon.GetTurnOffLeds(),
+				Type: PACKAGE_SIMULATE_BUTTON_RESP,
+				Payload: []any{
+					target.SimulateButtonActionName(),
 				},
 			}, nil
 		},

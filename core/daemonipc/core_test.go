@@ -26,6 +26,7 @@ type fakeDaemon struct{ off bool }
 
 func (d *fakeDaemon) GetTurnOffLeds() bool    { return d.off }
 func (d *fakeDaemon) SetTurnOffLeds(off bool) { d.off = off }
+func (d *fakeDaemon) SimulateButton(target SimulateButtonTarget) {}
 
 func TestServerParseDataUsesTypeinject(t *testing.T) {
 	server := InitServer(&fakeDaemon{})

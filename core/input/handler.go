@@ -257,6 +257,30 @@ func (this *InputDevice) State() *InputEvent {
 	return e
 }
 
+// InjectEvent pushes a synthetic button event into the queue, to be consumed by
+// Tick exactly like a real press/release. Used by IPC "tap" simulation so it
+// flows through the same event-handling path as the physical button.
+func (this *InputDevice) InjectEvent(event *InputEvent) {
+	if event == nil {
+		return
+	}
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	this.event_queue.PushBack(event)
+}
+
+// InjectPress simulates a held button (KEY DOWN) for `duration`, so State()
+// reports a long-press >= shutdown_threshold. long_tap_reported is set so the
+// (never-arriving) release does not emit a duplicate long-tap. Used by IPC
+// "shutdown" simulation.
+func (this *InputDevice) InjectPress(duration time.Duration) {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	this.pressed = true
+	this.press_start = time.Now().Add(-duration)
+	this.long_tap_reported = true
+}
+
 func (this *InputDevice) Tick() []*InputEvent {
 	this.lock.Lock()
 	defer this.lock.Unlock()

@@ -19,6 +19,7 @@ var ipc_client_chan daemonipc.IPCClientRespChannel
 
 var ipc_mapping = map[string]daemonipc.IPCPackageType{
 	"toggle-led": daemonipc.PACKAGE_TOGGLE_LED,
+	"tap":        daemonipc.PACKAGE_SIMULATE_BUTTON,
 }
 
 type IPCCmd struct {
@@ -110,6 +111,24 @@ func RegisterHandler(package_type daemonipc.IPCPackageType, builder any) {
 
 func init() {
 	RegisterHandler(daemonipc.PACKAGE_TOGGLE_LED, buildToggleLed)
+	RegisterHandler(daemonipc.PACKAGE_SIMULATE_BUTTON, buildTap)
+}
+
+// buildTap maps a CLI subcommand to a SimulateButtonTarget.
+func buildTap(action string) ([]any, error) {
+	action = strings.ToLower(strings.TrimSpace(action))
+	var target daemonipc.SimulateButtonTarget
+	switch action {
+	case "", "-", "tap":
+		target = daemonipc.SIMULATE_BUTTON_TAP
+	case "long":
+		target = daemonipc.SIMULATE_BUTTON_LONG
+	case "shutdown":
+		target = daemonipc.SIMULATE_BUTTON_SHUTDOWN
+	default:
+		return nil, fmt.Errorf("invalid tap action %q (use tap/long/shutdown)", action)
+	}
+	return []any{target}, nil
 }
 
 // buildToggleLed maps a CLI state string to a ToggleLEDTarget.

@@ -120,6 +120,36 @@ func (this *Daemon) GetTurnOffLeds() bool {
 	return this.turn_off_leds.Load()
 }
 
+// SimulateButton injects a synthetic button action, reusing the physical-button
+// path: tap/long push an event into the input queue (processed by Tick on the
+// mainloop, no shared-state race); shutdown simulates a held button long enough
+// for the mainloop's shutdown check to fire doShutdown.
+func (this *Daemon) SimulateButton(target daemonipc.SimulateButtonTarget) {
+	now := time.Now()
+	switch target {
+	case daemonipc.SIMULATE_BUTTON_TAP:
+		this.input_device.InjectEvent(&input.InputEvent{
+			Type:     input.INPUT_TAP,
+			Time:     now.Add(-(this.input_device.Config.MultipleTapThreshold + time.Millisecond)),
+			TapCount: 1,
+			Status:   input.DEVICE_STATUS_NORMAL,
+		})
+	case daemonipc.SIMULATE_BUTTON_LONG:
+		this.input_device.InjectEvent(&input.InputEvent{
+			Type:     input.INPUT_LONG_TAP,
+			Time:     now.Add(-(this.input_device.Config.MultipleTapThreshold + time.Millisecond)),
+			TapCount: 1,
+			Status:   input.DEVICE_STATUS_NORMAL,
+		})
+	case daemonipc.SIMULATE_BUTTON_SHUTDOWN:
+		d := this.shutdown_threshold
+		if d <= 0 {
+			d = time.Second // shutdown disabled: still simulate a long press
+		}
+		this.input_device.InjectPress(d + time.Second)
+	}
+}
+
 func (this *Daemon) SetTurnOffLeds(off bool) {
 	this.turn_off_leds.Store(off)
 	this.applyLedState() // IPC 线程改完立即生效,不等下一次模式切换

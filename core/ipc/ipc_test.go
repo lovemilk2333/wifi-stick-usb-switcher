@@ -78,3 +78,38 @@ func TestListCommands(t *testing.T) {
 		t.Fatalf("unexpected argv %v", toggle.Args)
 	}
 }
+
+func TestBuildTap(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		expected daemonipc.SimulateButtonTarget
+		wantErr  bool
+	}{
+		{"no arg -> tap", nil, daemonipc.SIMULATE_BUTTON_TAP, false},
+		{"empty -> tap", []string{""}, daemonipc.SIMULATE_BUTTON_TAP, false},
+		{"- -> tap", []string{"-"}, daemonipc.SIMULATE_BUTTON_TAP, false},
+		{"tap -> tap", []string{"tap"}, daemonipc.SIMULATE_BUTTON_TAP, false},
+		{"long -> long", []string{"long"}, daemonipc.SIMULATE_BUTTON_LONG, false},
+		{"shutdown -> shutdown", []string{"shutdown"}, daemonipc.SIMULATE_BUTTON_SHUTDOWN, false},
+		{"bad -> error", []string{"bogus"}, 0, true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			payload, err := build_payload(daemonipc.PACKAGE_SIMULATE_BUTTON, c.args)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %v", payload)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if payload[0].(daemonipc.SimulateButtonTarget) != c.expected {
+				t.Fatalf("expected %v, got %v", c.expected, payload[0])
+			}
+		})
+	}
+}
