@@ -102,6 +102,9 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 	}
 
 	argv_value := reflect.ValueOf(argv)
+	if !argv_value.IsValid() {
+		return nil, fmt.Errorf("invalid value type: nil is not `%s`", meta.Type.Name())
+	}
 	if argv_value.Kind() == reflect.Pointer {
 		if argv_value.IsNil() {
 			return nil, fmt.Errorf("invalid value type: nil is not `%s`", meta.Type.Name())
@@ -112,7 +115,18 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 		argv_value = argv_value.Elem()
 	}
 
+	// function-typed dependencies are injected as-is (the callable itself)
+	if meta.Type.Kind() == reflect.Func {
+		if meta.IsPointer && argv_value.Kind() != reflect.Pointer {
+			ptr := reflect.New(meta.Type)
+			ptr.Elem().Set(argv_value)
+			return ptr.Interface(), nil
+		}
+		return argv, nil
+	}
+
 	var result any
+	var converted reflect.Value
 
 	switch {
 	// 模式 1：FIELD_TYPE_VALIDATION_STRUCT，整个结构体直接丢给 go-validator 校验
@@ -122,10 +136,11 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 		}
 
 		converted_value := argv_value.Convert(meta.Type)
-		if err := default_validator.Struct(converted_value); err != nil {
+		if err := default_validator.Struct(converted_value.Interface()); err != nil {
 			return nil, err
 		}
 
+		converted = converted_value
 		result = converted_value.Interface()
 	// 模式 2：FIELD_TYPE_RECURSION，逐个子字段处理
 	case MetadataHasType(meta.FieldType, FIELD_TYPE_RECURSION):
@@ -154,15 +169,13 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 				}
 			}
 
-			// 深度递归处理子元数据（如果存在）
-			if len(child_meta.Child) > 0 {
-				value, err := ConvertArgv(child_meta, field_value.Interface())
-				if err != nil {
-					return nil, err
-				}
-
-				args = append(args, value)
+			// 深度递归处理子元数据（如果存在），否则直接转换当前字段
+			value, err := ConvertArgv(child_meta, field_value.Interface())
+			if err != nil {
+				return nil, err
 			}
+
+			args = append(args, value)
 		}
 
 		result = args
@@ -173,21 +186,31 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 			if err != nil {
 				return nil, err
 			}
+			converted = r
 			result = r.Interface()
 		} else {
 			if !argv_value.CanConvert(meta.Type) {
 				return nil, fmt.Errorf("invalid value type: expect `Struct`, got `%s`", argv_value.Type().Name())
 			}
 
-			result = argv_value.Convert(meta.Type).Interface()
+			converted = argv_value.Convert(meta.Type)
+			result = converted.Interface()
 		}
 	default:
 		return nil, fmt.Errorf("unknown `FieldType` of field metadata: %v", meta.FieldType)
 	}
 
 	if meta.IsPointer {
+		if converted.IsValid() {
+			ptr := reflect.New(meta.Type)
+			ptr.Elem().Set(converted)
+			return ptr.Interface(), nil
+		}
 		return &result, nil
-	} else {
-		return result, nil
 	}
+
+	if converted.IsValid() {
+		return converted.Interface(), nil
+	}
+	return result, nil
 }

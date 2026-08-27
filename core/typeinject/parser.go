@@ -63,6 +63,9 @@ func ParseInjectTag(tag string, metadata *DepInjectFieldMetadata) error {
 	}
 
 	for _, tag_part := range tag_parts {
+		if tag_part == "" {
+			continue
+		}
 		switch tag_part {
 		case INJECT_TAG_IGNORE_CHECK:
 			metadata.FieldType = MetadataRemoveType(metadata.FieldType, FIELD_TYPE_CHECK)
@@ -136,19 +139,18 @@ func ParseStaticArgv(index int, argv_type reflect.Type) *DepInjectFieldMetadata 
 }
 
 func ParseFunctionArgv(index int, argv_type reflect.Type) (*DepInjectFieldMetadata, error) {
-	kind := argv_type.Kind()
-
 	metadata := &DepInjectFieldMetadata{
 		Index: index,
 		Type:  argv_type,
 	}
 
-	if kind == reflect.Pointer {
+	if argv_type.Kind() == reflect.Pointer {
 		argv_type = argv_type.Elem()
+		metadata.Type = argv_type
 		metadata.IsPointer = true
 	}
 
-	switch kind {
+	switch argv_type.Kind() {
 	case reflect.Func:
 		child_struct, err := GetStructByFunctionType(argv_type)
 		if err != nil {
