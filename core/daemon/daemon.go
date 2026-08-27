@@ -534,7 +534,7 @@ func (this *Daemon) doShutdown() {
 		shell = "/bin/bash"
 	}
 
-	go func() {
+	shutdown := func() {
 		log.Printf("INFO executing shutdown command: %s -c %s\n", shell, this.shutdown_command)
 		out, err := exec.Command(shell, "-c", this.shutdown_command).CombinedOutput()
 		if err != nil {
@@ -544,7 +544,7 @@ func (this *Daemon) doShutdown() {
 		}
 
 		wait_shutdown <- true
-	}()
+	}
 
 	var last_interpreter *led.LedInterpreter
 
@@ -556,7 +556,8 @@ func (this *Daemon) doShutdown() {
 	}
 	this.updateInterpreters()
 
-	for i := len(this.interpreters) - 1; i >= 0; i-- {
+	interpreter_length := len(this.interpreters)
+	for i := interpreter_length - 1; i >= 0; i-- {
 		interpreter := this.interpreters[i]
 		if interpreter == nil {
 			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
@@ -567,6 +568,8 @@ func (this *Daemon) doShutdown() {
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
+
+	go shutdown()
 
 	if last_interpreter != nil { // keep last Led on to show if system is powered off
 		last_interpreter.SetMode(led.MODE_PRESET_ON)

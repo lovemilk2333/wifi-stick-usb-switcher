@@ -3,8 +3,10 @@ package typeinject
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 // Indirect-call helpers: infer arg types from the function signature, convert
@@ -185,4 +187,40 @@ func CallFunctionJSON(function any, data []byte, static ...any) ([]reflect.Value
 	call_args = append(call_args, Args2values(converted)...)
 
 	return reflect.ValueOf(function).Call(call_args), nil
+}
+
+// ProcessAnyPayload validates a single value whose static type is `any`. It matches
+// any concrete value but rejects pointers and structs. This mirrors daemonipc's
+// per-arg payload-type check, generalized to `any`.
+func ProcessAnyPayload(value any) (any, error) {
+	if value == nil {
+		return nil, fmt.Errorf("payload value cannot be nil")
+	}
+
+	kind := reflect.TypeOf(value).Kind()
+	if kind == reflect.Pointer || kind == reflect.Struct {
+		return nil, fmt.Errorf("payload value of kind %s is not allowed (pointer/struct rejected)", kind)
+	}
+
+	return value, nil
+}
+
+// ConvertAnyPayload validates each element of payload (static type `any`) using
+// ProcessAnyPayload, accumulating errors like daemonipc's parse_payload did.
+func ConvertAnyPayload(payload []any) ([]any, error) {
+	result := make([]any, 0, len(payload))
+	var errs []string
+	for i, value := range payload {
+		v, err := ProcessAnyPayload(value)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("arg[%d]: %v", i, err))
+			continue
+		}
+		result = append(result, v)
+	}
+
+	if len(errs) > 0 {
+		return nil, errors.New(strings.Join(errs, "; "))
+	}
+	return result, nil
 }

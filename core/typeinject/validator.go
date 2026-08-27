@@ -180,6 +180,13 @@ func ConvertArgv(meta *DepInjectFieldMetadata, argv any) (any, error) {
 
 		result = args
 	case MetadataHasType(meta.FieldType, FIELD_TYPE_CHECK):
+		// `any` parameter: accept any concrete value but reject pointer/struct
+		if meta.Type.Kind() == reflect.Interface {
+			if argv_value.Kind() == reflect.Pointer || argv_value.Kind() == reflect.Struct {
+				return nil, fmt.Errorf("invalid value type: pointer/struct not allowed for `any` param, got `%s`", argv_value.Type().Name())
+			}
+			return argv, nil
+		}
 
 		if argv, ok := argv.(json.Number); ok {
 			r, err := ConvertJsonNumber(argv, meta.Type)
