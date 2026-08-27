@@ -19,12 +19,12 @@
 
 ## 按键行为
 
-| 事件              | 触发条件                                        | 默认行为                                                        |
-| :---------------- | :---------------------------------------------- | :-------------------------------------------------------------- |
-| 短按 tap          | 按下时间 < `--long-tap-threshold`(500ms)        | 未在选择中:切换到下一个模式;子模式选择中:切换子模式             |
-| 长按 long-tap     | 按下时间 ≥ `--long-tap-threshold`               | 进入/退出子模式选择,LED 先关闭 `--submode-led-duration`(750ms) 提示 |
+| 事件              | 触发条件                                                     | 默认行为                                                                                                                                                                                                   |
+| :---------------- | :----------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 短按 tap          | 按下时间 < `--long-tap-threshold`(500ms)                     | 未在选择中:切换到下一个模式;子模式选择中:切换子模式                                                                                                                                                        |
+| 长按 long-tap     | 按下时间 ≥ `--long-tap-threshold`                            | 进入/退出子模式选择,LED 先关闭 `--submode-led-duration`(750ms) 提示                                                                                                                                        |
 | 长按关机          | 按住时间 ≥ `--shutdown-threshold`(5s,须 > 长按阈值,`0` 禁用) | 立即关机,不等松开:LED 反向逐颗亮起(最后至最前,各 500ms),随后执行 `--shutdown-command`。默认按键是 KEY_RESTART,松开事件会触发系统级重启,poweroff 必须在按住期间调用;触发后停止一切事件处理(INPUT Grab 保持) |
-| 连击 multiple-tap | `--multiple-tap-threshold`(500ms)内的连续 tap   | 预留(TODO)                                                     |
+| 连击 multiple-tap | `--multiple-tap-threshold`(500ms)内的连续 tap                | 预留(TODO)                                                                                                                                                                                                 |
 
 - `--long-tap-immediately`(默认开启):按下时间一到阈值立即上报长按,无需等松开。
 - `--multiple-tap-threshold` 设为负数可禁用连击。
@@ -34,25 +34,25 @@
 
 模式(`RNDIS` / `ADB`)内部有子模式(submode),仅内存状态,切换子模式时**不重建 gadget**(重建会断开对端 RNDIS 网卡,Windows 侧需要重新枚举、ICS 重新就绪),直接在当前接口上重配网络。
 
-| 模式  | 子模式 | 行为                                                          |
-| :---- | :----- | :------------------------------------------------------------ |
-| RNDIS | 0(默认) | 网关模式:接口配 `--rndis-ip`,启动 dnsmasq 作 DHCP 服务器     |
+| 模式  | 子模式  | 行为                                                                                                                         |
+| :---- | :------ | :--------------------------------------------------------------------------------------------------------------------------- |
+| RNDIS | 0(默认) | 网关模式:接口配 `--rndis-ip`,启动 dnsmasq 作 DHCP 服务器                                                                     |
 | RNDIS | 1       | 从模式:udhcpc 探测上游 DHCP → 按 `--rndis-client-ip` 模板配客户端 IP + 默认路由,上游 DNS 直写 `/etc/resolv.conf`(离开时还原) |
-| ADB   | 0       | ADB 模式,无子模式                                            |
+| ADB   | 0       | ADB 模式,无子模式                                                                                                            |
 
 - 从模式探测失败(网卡未就绪、非连续掩码、前缀 ≥ /30)自动回退网关模式,保证 stick 始终可达。
 - 子模式通过 `MaxSubmode()` 有界循环(`RNDIS` 0↔1),`enable()` 只会看到合法值。
 
 ## LED 显示
 
-| 状态                     | 行为                                                                 |
-| :----------------------- | :------------------------------------------------------------------- |
-| 模式切换                 | 快闪(`--led-blink-duration` on / `--led-blink-interval` off)        |
-| 进入/退出子模式选择      | LED 先关闭 `--submode-led-duration` 提示,结束后显示子模式状态        |
-| 子模式切换(选择中短按)  | LED 关闭                                                             |
-| 子模式状态               | 0 → 常亮;1 → 慢闪(500ms on / 500ms off)                             |
-| `cli ipc toggle-led`     | 1 关闭所有 LED(立即生效,不等待下一次模式切换);2 恢复                |
-| 长按关机触发             | 反向逐颗亮起 500ms(最后至最前),随后执行关机命令 |
+| 状态                   | 行为                                                          |
+| :--------------------- | :------------------------------------------------------------ |
+| 模式切换               | 快闪(`--led-blink-duration` on / `--led-blink-interval` off)  |
+| 进入/退出子模式选择    | LED 先关闭 `--submode-led-duration` 提示,结束后显示子模式状态 |
+| 子模式切换(选择中短按) | LED 关闭                                                      |
+| 子模式状态             | 0 → 常亮;1 → 慢闪(500ms on / 500ms off)                       |
+| `cli ipc toggle-led`   | 1 关闭所有 LED(立即生效,不等待下一次模式切换);2 恢复          |
+| 长按关机触发           | 反向逐颗亮起 500ms(最后至最前),随后执行关机命令               |
 
 ## 构建
 
@@ -85,55 +85,55 @@
 
 ### `cli daemon [flags]`
 
-| 参数                       | 默认值                             | 说明                                              |
-| :------------------------- | :--------------------------------- | :------------------------------------------------ |
-| `-d, --devnode`            | 必填                               | 按键设备节点,如 `/dev/input/event0`               |
-| `--long-tap-immediately`   | `true`                             | 按下时间达到阈值立即上报长按,不等松开             |
-| `--long-tap-threshold`     | `500ms`                            | 长按阈值                                          |
-| `--multiple-tap-threshold` | `500ms`                            | 连击阈值,< 0 禁用                                 |
-| `--auto-confirm-threshold` | `5s`                               | 预留,未使用                                       |
-| `-l, --led`                | —                                  | LED 节点,可重复,如 `-l /sys/class/leds/blue:wifi` |
-| `--led-blink-duration`     | `100ms`                            | 模式切换快闪的亮时长                              |
-| `--led-blink-interval`     | `300ms`                            | 模式切换快闪的灭时长                              |
-| `--submode-led-duration`   | `750ms`                            | 进入/退出子模式选择时 LED 的关闭提示时长           |
-| `-c, --config-fs`          | `/sys/kernel/config/usb_gadget/g1` | configfs 路径(不存在时由 `gc -a` 创建)            |
-| `-g, --gc-path`            | `gc`                               | HandsomeMod `gc` 工具路径或 `$PATH` 中的可执行名  |
-| `--rndis-device-mac`       | `02:12:34:56:78:9a`                | 设备侧 RNDIS 接口 MAC                             |
-| `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                  |
-| `-a, --rndis-ip`           | `10.22.33.1/24`                    | RNDIS 接口 IP(带前缀),DHCP 池由此自动推导         |
-| `--rndis-client-ip`        | `0.0.0.33`                         | 从模式客户端 IP 模板,0 字节取上游网段字节          |
-| `--rndis-client-timeout`   | `5s`                               | 从模式总超时(等网卡 + DHCP 探测)                  |
-| `-i, --rndis-ifname`       | `usb0`                             | RNDIS 接口名,`ip link` 可查                       |
-| `--rndis-qmult`            | `8`                                | usb ifname qmult(队列长度乘数),0 不写             |
-| `--rndis-serial-number`    | `wifi-stick-miruku`                | RNDIS 模式的 USB 序列号字符串                     |
-| `--rndis-manufacturer`     | `wifi-stick`                       | RNDIS 模式的制造商字符串                          |
-| `--rndis-product`          | `RNDIS Ethernet`                   | RNDIS 模式的产品字符串                            |
-| `--adb-serial-number`      | `wifi-stick-miruku`                | ADB 模式的 USB 序列号字符串                       |
-| `--adb-manufacturer`       | `Google`                           | ADB 模式的产品字符串                              |
-| `--adb-product`            | `ADB Gadget`                       | ADB 模式的产品字符串                              |
-| `--adb-env`                | `TERM=xterm-256color`              | adbd 附加环境变量,可重复                          |
-| `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                   |
-| `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)        |
-| `--tick-rate`              | `50ms`                             | daemon 事件循环 tick 间隔                          |
+| 参数                       | 默认值                             | 说明                                                |
+| :------------------------- | :--------------------------------- | :-------------------------------------------------- |
+| `-d, --devnode`            | 必填                               | 按键设备节点,如 `/dev/input/event0`                 |
+| `--long-tap-immediately`   | `true`                             | 按下时间达到阈值立即上报长按,不等松开               |
+| `--long-tap-threshold`     | `500ms`                            | 长按阈值                                            |
+| `--multiple-tap-threshold` | `500ms`                            | 连击阈值,< 0 禁用                                   |
+| `--auto-confirm-threshold` | `5s`                               | 预留,未使用                                         |
+| `-l, --led`                | —                                  | LED 节点,可重复,如 `-l /sys/class/leds/blue:wifi`   |
+| `--led-blink-duration`     | `100ms`                            | 模式切换快闪的亮时长                                |
+| `--led-blink-interval`     | `300ms`                            | 模式切换快闪的灭时长                                |
+| `--submode-led-duration`   | `750ms`                            | 进入/退出子模式选择时 LED 的关闭提示时长            |
+| `-c, --config-fs`          | `/sys/kernel/config/usb_gadget/g1` | configfs 路径(不存在时由 `gc -a` 创建)              |
+| `-g, --gc-path`            | `gc`                               | HandsomeMod `gc` 工具路径或 `$PATH` 中的可执行名    |
+| `--rndis-device-mac`       | `02:12:34:56:78:9a`                | 设备侧 RNDIS 接口 MAC                               |
+| `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                    |
+| `-a, --rndis-ip`           | `10.22.33.1/24`                    | RNDIS 接口 IP(带前缀),DHCP 池由此自动推导           |
+| `--rndis-client-ip`        | `0.0.0.33`                         | 从模式客户端 IP 模板,0 字节取上游网段字节           |
+| `--rndis-client-timeout`   | `5s`                               | 从模式总超时(等网卡 + DHCP 探测)                    |
+| `-i, --rndis-ifname`       | `usb0`                             | RNDIS 接口名,`ip link` 可查                         |
+| `--rndis-qmult`            | `8`                                | usb ifname qmult(队列长度乘数),0 不写               |
+| `--rndis-serial-number`    | `wifi-stick-miruku`                | RNDIS 模式的 USB 序列号字符串                       |
+| `--rndis-manufacturer`     | `wifi-stick`                       | RNDIS 模式的制造商字符串                            |
+| `--rndis-product`          | `RNDIS Ethernet`                   | RNDIS 模式的产品字符串                              |
+| `--adb-serial-number`      | `wifi-stick-miruku`                | ADB 模式的 USB 序列号字符串                         |
+| `--adb-manufacturer`       | `Google`                           | ADB 模式的产品字符串                                |
+| `--adb-product`            | `ADB Gadget`                       | ADB 模式的产品字符串                                |
+| `--adb-env`                | `TERM=xterm-256color`              | adbd 附加环境变量,可重复                            |
+| `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                     |
+| `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)          |
+| `--tick-rate`              | `50ms`                             | daemon 事件循环 tick 间隔                           |
 | `--shutdown-threshold`     | `10s`                              | 长按关机阈值,必须 > `--long-tap-threshold`,`0` 禁用 |
-| `--shutdown-command`       | `poweroff`                         | 长按关机时执行的命令                              |
-| `--shell`                  | `/bin/bash`                        | 执行关机命令的 shell,`$SHELL` 环境变量优先        |
+| `--shutdown-command`       | `poweroff`                         | 长按关机时执行的命令                                |
+| `--shutdown-shell`         | `/bin/bash`                        | 执行关机命令的 shell                                |
 
 ### `cli ipc <command> [args]`
 
 通过 unix socket(`/tmp/<PROJECT_IDENT>.sock`)与 daemon 交互。
 
-| 命令        | 参数   | 说明                          | 输出       |
-| :---------- | :----- | :---------------------------- | :--------- |
-| `toggle-led` | `0`    | 查询当前 LED 状态             | `led: on` / `led: off` |
-| `toggle-led` | `1`    | 关闭 LED(立即生效)           | `led: off` |
-| `toggle-led` | `2`    | 开启 LED(立即生效)           | `led: on`  |
+| 命令         | 参数 | 说明               | 输出                   |
+| :----------- | :--- | :----------------- | :--------------------- |
+| `toggle-led` | `0`  | 查询当前 LED 状态  | `led: on` / `led: off` |
+| `toggle-led` | `1`  | 关闭 LED(立即生效) | `led: off`             |
+| `toggle-led` | `2`  | 开启 LED(立即生效) | `led: on`              |
 
-| 参数                 | 默认值 | 说明                              |
-| :------------------- | :----- | :-------------------------------- |
-| `-t, --timeout`      | `10s`  | 等待 IPC 响应超时                 |
-| `--connect-timeout`  | `5s`   | 连接与握手超时                    |
-| `--dial-retry`       | `1s`   | 连接重试间隔                      |
+| 参数                | 默认值 | 说明              |
+| :------------------ | :----- | :---------------- |
+| `-t, --timeout`     | `10s`  | 等待 IPC 响应超时 |
+| `--connect-timeout` | `5s`   | 连接与握手超时    |
+| `--dial-retry`      | `1s`   | 连接重试间隔      |
 
 ```bash
 ./cli ipc toggle-led 0   # 查询

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -49,11 +50,12 @@ type DaemonCmd struct {
 	AdbProduct           string           `arg:"--adb-product" default:"ADB Gadget" help:"the product string of the adb usb gadget device"`
 	AdbEnv               []string         `arg:"--adb-env,separate" help:"extra environment variables (KEY=VALUE) passed to the adbd process, repeatable, e.g. --adb-env=TERM=xterm-256color; default TERM=xterm-256color"`
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
-	IPCAllowOtherUser    bool             `arg:"--ipc-share, --ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
-	TickRate             time.Duration    `arg:"--tick-rate" default:"50ms" help:"daemon event loop tick rate"`
+	IPCAllowOtherUser    bool             `arg:"--ipc-share,--ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
+	TickInterval         time.Duration    `arg:"--tick-rate,--tick-interval" default:"50ms" help:"daemon event loop tick interval"`
 	ShutdownThreshold    time.Duration    `arg:"--shutdown-threshold" default:"5s" help:"long-press shutdown threshold, must be greater than --long-tap-threshold; 0 disables"`
 	ShutdownCommand      string           `arg:"--shutdown-command" default:"poweroff" help:"command run when long-press shutdown triggers"`
-	Shell                string           `arg:"--shell" default:"/bin/bash" help:"shell used to run --shutdown-command, fallback when $SHELL is unset"`
+	ShutdownShell        string           `arg:"--shutdown-shell" default:"" help:"shell used to run --shutdown-command"`
+	ShutdownTimeout      time.Duration    `arg:"--shutdown-timeout" default:"30s" help:"run --shutdown-command timeout"`
 }
 
 type Daemon struct {
@@ -71,7 +73,7 @@ type Daemon struct {
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
 	submode_changed  bool
 	turn_off_leds    atomic.Bool // IPC goroutine 写、applyFunction goroutine 读,需原子
-	tick_rate        time.Duration
+	tick_interval    time.Duration
 	daemonipc_config *ipc.ServerConfig
 
 	// submode selection state:长按进入选择模式后,短按切换 submode,
@@ -93,7 +95,8 @@ type Daemon struct {
 	// shutting_down = 已进入关机流程,不再处理任何事件。
 	shutdown_threshold time.Duration
 	shutdown_command   string
-	shell              string
+	shutdown_shell     string
+	shutdown_timeout   time.Duration
 	shutting_down      bool
 }
 
@@ -106,7 +109,7 @@ var LED_SUBMODE_MODES = []*led.LedMode{
 
 func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
 	daemon := &Daemon{}
-	daemon.tick_rate = cmd.TickRate
+
 	if err := daemon.init(cmd); err != nil {
 		return nil, err
 	}
@@ -142,26 +145,25 @@ func (this *Daemon) Mainloop() error {
 	go this.runIpcServer()
 
 	log.Printf("INFO daemon LED init\n")
-	for _, interpreter := range this.interpreters { // close all first
+	for _, interpreter := range this.interpreters {
 		if interpreter == nil {
 			continue
 		}
 		interpreter.SetMode(led.MODE_PRESET_OFF)
-		interpreter.Tick()
 	}
+	this.updateInterpreters()
 
 	for _, interpreter := range this.interpreters {
 		if interpreter == nil {
 			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
 		}
 		interpreter.SetMode(led.MODE_PRESET_ON)
-		interpreter.Tick()
+		this.updateInterpreters()
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
-		interpreter.Tick()
 	}
 
-	ticker := time.NewTicker(this.tick_rate)
+	ticker := time.NewTicker(this.tick_interval)
 	defer ticker.Stop()
 
 	go this.applyFunction()
@@ -205,6 +207,11 @@ var LED_MODE_BLINK *led.LedMode
 // init validates cmd and stores all initialised handles on the Daemon struct.
 func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- validate arguments ------------------------------------------------
+	if cmd.TickInterval <= 0 {
+		return fmt.Errorf("tick interval must > 0")
+	}
+
+	this.tick_interval = cmd.TickInterval
 
 	if this.IsValidPath(cmd.Devnode, "/dev/input/", true, true) != base.PATH_STATUS_OK {
 		return fmt.Errorf("`%s` is not a valid input device", cmd.Devnode)
@@ -240,9 +247,11 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	if cmd.ShutdownThreshold > 0 && cmd.ShutdownThreshold <= cmd.LongTapThreshold {
 		return fmt.Errorf("`--shutdown-threshold` must be greater than `--long-tap-threshold`")
 	}
+
 	this.shutdown_threshold = cmd.ShutdownThreshold
 	this.shutdown_command = cmd.ShutdownCommand
-	this.shell = cmd.Shell
+	this.shutdown_shell = cmd.ShutdownShell
+	this.shutdown_timeout = cmd.ShutdownTimeout
 
 	// 初始 true:见 struct 注释 —— 启动时不要误触发关闭期检查
 	this.submode_entry_done = true
@@ -505,19 +514,47 @@ func (this *Daemon) Tick() {
 	}
 }
 
-// doShutdown 关机流程:LED 反向(最后至最前)逐颗亮起 500ms 提示,
-// 然后执行关机命令,完成后调用方(Mainloop)退出进程。由按住时长
-// 达标的 tick 触发(不等松开),同步执行 —— 命令失败(或测试命令)
-// 也要走完退出,不留一个空转的 daemon。
+func (this *Daemon) updateInterpreters() {
+	for _, interpreter := range this.interpreters {
+		if interpreter == nil {
+			continue
+		}
+		interpreter.Tick()
+	}
+}
+
 func (this *Daemon) doShutdown() {
+	wait_shutdown := make(chan bool)
+
+	shell := strings.TrimSpace(this.shutdown_shell)
+	if shell == "" {
+		shell = os.Getenv("SHELL")
+	}
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+
+	go func() {
+		log.Printf("INFO executing shutdown command: %s -c %s\n", shell, this.shutdown_command)
+		out, err := exec.Command(shell, "-c", this.shutdown_command).CombinedOutput()
+		if err != nil {
+			log.Printf("ERROR: shutdown command failed: %v: %s\n", err, out)
+		} else {
+			log.Printf("INFO shutdown successfully")
+		}
+
+		wait_shutdown <- true
+	}()
+
 	var last_interpreter *led.LedInterpreter
+
 	for _, interpreter := range this.interpreters { // close all first
 		if interpreter == nil {
 			continue
 		}
 		interpreter.SetMode(led.MODE_PRESET_OFF)
-		interpreter.Tick()
 	}
+	this.updateInterpreters()
 
 	for i := len(this.interpreters) - 1; i >= 0; i-- {
 		interpreter := this.interpreters[i]
@@ -526,29 +563,21 @@ func (this *Daemon) doShutdown() {
 		}
 		last_interpreter = interpreter
 		interpreter.SetMode(led.MODE_PRESET_ON)
-		interpreter.Tick()
+		this.updateInterpreters()
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
-		interpreter.Tick()
 	}
 
 	if last_interpreter != nil { // keep last Led on to show if system is powered off
 		last_interpreter.SetMode(led.MODE_PRESET_ON)
-		last_interpreter.Tick()
+		this.updateInterpreters()
 	}
 
-	// 优先用环境变量 $SHELL(如 systemd 服务里未设置则为空),
-	// 未设置时用 --shell(默认 /bin/bash)
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = this.shell
-	}
-	log.Printf("WARN: executing shutdown command: %s -c %s\n", shell, this.shutdown_command)
-	out, err := exec.Command(shell, "-c", this.shutdown_command).CombinedOutput()
-	if err != nil {
-		log.Printf("ERROR: shutdown command failed: %v: %s\n", err, out)
-	} else {
-		log.Printf("INFO shutdown successfully")
+	// waiting for shutdown
+	select {
+	case <-wait_shutdown:
+	case <-time.After(this.shutdown_timeout):
+		log.Printf("WARN: shutdown command timed out")
 	}
 }
 
