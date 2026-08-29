@@ -651,23 +651,3 @@ func TestCallFunctionJSONWithStatic(t *testing.T) {
 	}
 }
 
-func TestParseJsonPayload(t *testing.T) {
-	fn := func(a int, b string) (int, string) { return a, b }
-	out, err := ParseJsonPayload(fn, []byte(`[42, "hi"]`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out[0].(int) != 42 || out[1].(string) != "hi" {
-		t.Fatalf("unexpected %v", out)
-	}
-
-	// number type coercion: json.Number "7" -> int8
-	out, err = ParseJsonPayload(fn, []byte(`[7, "x"]`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out[0].(int) != 7 {
-		t.Fatalf("unexpected %v", out)
-	}
-}
-

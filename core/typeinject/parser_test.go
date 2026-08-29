@@ -228,3 +228,44 @@ func TestGetStructByFunctionType(t *testing.T) {
 		t.Fatal("static args handling incorrect")
 	}
 }
+
+func TestParseJsonPayload(t *testing.T) {
+	fn := func(a int, b string) (int, string) { return a, b }
+	out, err := ParseJsonPayload(fn, []byte(`[42, "hi"]`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out[0].(int) != 42 || out[1].(string) != "hi" {
+		t.Fatalf("unexpected %v", out)
+	}
+
+	// number type coercion: json.Number "7" -> int
+	out, err = ParseJsonPayload(fn, []byte(`[7, "x"]`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out[0].(int) != 7 {
+		t.Fatalf("unexpected %v", out)
+	}
+}
+
+func TestParseJsonPayloadWithMetas(t *testing.T) {
+	typ := reflect.TypeOf(func(a int, b string) {})
+	metas, err := GetStructByFunctionType(typ)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out, err := ParseJsonPayloadWithMetas(metas, []byte(`[9, "yo"]`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out[0].(int) != 9 || out[1].(string) != "yo" {
+		t.Fatalf("unexpected %v", out)
+	}
+
+	// length mismatch is rejected
+	if _, err := ParseJsonPayloadWithMetas(metas, []byte(`[9]`)); err == nil {
+		t.Fatal("expected length mismatch error")
+	}
+}
