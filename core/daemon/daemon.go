@@ -38,7 +38,7 @@ type DaemonCmd struct {
 	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
 	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
-	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP template (x.x.x.x, zero bytes take the upstream subnet bytes) of the stick in RNDIS client submode, e.g. 0.0.22.33"`
+	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP of the stick in RNDIS client submode: template (x.x.x.x, zero bytes take the upstream subnet bytes, e.g. 0.0.22.33) for DHCP leases; its last byte is used for the static ICS probe (192.168.137.x)"`
 	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"5s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 5s, 30s"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to create for RNDIS"`
 	RndisQmult           uint             `arg:"--rndis-qmult" default:"8" help:"usb ifname qmult (queue length multiplier) config for RNDIS"`
@@ -411,6 +411,7 @@ func (this *Daemon) applyFunction() {
 				interpreter.SetMode(led.MODE_PRESET_OFF)
 			}
 		}
+		log.Printf("INFO: submode switched: mode %d submode %d\n", this.current_mode, this.modes[this.current_mode].GetSubmode())
 		this.mode_changing = false
 		return
 	}
@@ -453,6 +454,7 @@ func (this *Daemon) applyFunction() {
 		}
 	}
 
+	log.Printf("INFO: mode switched: mode %d submode %d\n", this.current_mode, this.modes[this.current_mode].GetSubmode())
 	this.mode_changing = false
 }
 

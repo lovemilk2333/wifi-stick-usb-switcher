@@ -24,7 +24,7 @@ import (
 type UsbGadgetRndis struct {
 	ip_addr           netip.Prefix
 	connection_prefix string
-	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip),0 字节取上游网段字节
+	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip):0 字节取上游网段字节;主机字节用于无 DHCP 时的 ICS 静态探测(192.168.137.xx)
 	client_timeout    time.Duration // 从模式总超时:等网卡出现 + DHCP 探测(--rndis-client-timeout)
 
 	dev_addr     string
@@ -140,14 +140,21 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 	if err := ctx.setAttr(USB_GADGET_SUBPATH_BCD_USB, "0x0200"); err != nil {
 		return fmt.Errorf("write bcdUSB: %w", err)
 	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0xEF"); err != nil {
+	// 设备级 class 0/0/0:与真实 Android 手机 USB 共享(OPPO 0x22d9:0x2766
+	// 实测)一致,分类全在接口/IAD 级 —— 之前写 EF/02/01(Misc-IAD)时
+	// Win7 开启 ICS 后 RNDIS 驱动 null pointer 蓝屏,手机不会。
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0x00"); err != nil {
 		return fmt.Errorf("write bDeviceClass: %w", err)
 	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x02"); err != nil {
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x00"); err != nil {
 		return fmt.Errorf("write bDeviceSubClass: %w", err)
 	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x01"); err != nil {
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x00"); err != nil {
 		return fmt.Errorf("write bDeviceProtocol: %w", err)
+	}
+	// bcdDevice 对齐手机(OPPO 2.23),configfs 按 0x0223 写
+	if err := ctx.setAttr(USB_GADGET_SUBPATH_BCD_DEVICE, "0x0223"); err != nil {
+		return fmt.Errorf("write bcdDevice: %w", err)
 	}
 
 	// Override strings (gc defaults are generic HandsomeMod strings).
@@ -161,9 +168,10 @@ func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string)
 		return fmt.Errorf("write product: %w", err)
 	}
 
-	// 配置级属性对齐 vendor 参考脚本 original-rndis.sh:MaxPower 120mA +
-	// 配置名 "RNDIS"(gc 默认只建了 configs/c1.1,不写则是 2mA、无配置名)。
-	if err := ctx.WriteSubpath(base.Subpath("configs/c1.1/MaxPower"), true, []byte("120\n")); err != nil {
+	// 配置级属性对齐手机枚举:MaxPower 500mA(手机为 500,写 120 会被
+	// 部分 host 视为低功耗设备)+ 配置名 "RNDIS"(gc 默认只建了
+	// configs/c1.1,不写则是 2mA、无配置名)。
+	if err := ctx.WriteSubpath(base.Subpath("configs/c1.1/MaxPower"), true, []byte("500\n")); err != nil {
 		return fmt.Errorf("write configs/c1.1/MaxPower: %w", err)
 	}
 	if err := ctx.WriteSubpath(base.Subpath("configs/c1.1/strings/0x409/configuration"), true, []byte("RNDIS\n")); err != nil {
@@ -290,10 +298,10 @@ func (this *UsbGadgetRndis) enableGatewayMode(ifname string) error {
 	return nil
 }
 
-// enableClientMode 从模式:udhcpc 一次性从上游 DHCP 拿网段,usb0 配
-// 客户端 IP(--rndis-client-ip 规则),默认路由 via 上游网关 —— 行为
-// 与物理网卡 DHCP 接管一致。探测失败/掩码非连续/prefix >= /30(分
-// 不出可用地址)时直接跳回 submode 0 走主模式,保证 stick 始终可达。
+// enableClientMode 从模式:优先 udhcpc 从上游拿 DHCP(Windows ICS /
+// 路由器);拿不到可用租约时静态接入 Windows ICS 网段并 ping 网关
+// 验证(host 开了共享但 DHCP 分配器不可用时链路仍可达);仍不通才
+// 回退主模式,保证 stick 始终可达。
 func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 	// submode 直切(不重建 gadget)时主模式的 dnsmasq 还在接口上跑,
 	// 从模式是 DHCP 客户端,先停掉本机 DHCP 服务器(幂等,完整重建
@@ -308,18 +316,30 @@ func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 	}
 
 	subnet, router, dns, err := this.probeUpstreamDhcpWithRetry(ifname)
-	if err != nil {
-		log.Printf("WARN: dhcp probe failed, fallback to gateway mode: %v\n", err)
-		return this.fallbackToGatewayMode()
+	if err == nil {
+		if err := this.applyDhcpLease(ifname, subnet, router, dns); err == nil {
+			return nil
+		} else {
+			log.Printf("WARN: dhcp lease unusable, try ICS gateway probe: %v\n", err)
+		}
+	} else {
+		log.Printf("WARN: dhcp probe failed, try ICS gateway probe: %v\n", err)
 	}
+
+	return this.enableIcsStaticMode(ifname)
+}
+
+// applyDhcpLease 应用 DHCP 探测到的租约:usb0 配计算出的客户端 IP
+// (--rndis-client-ip 规则),默认路由 via 上游网关,DNS 用上游发的。
+// 掩码非连续/prefix >= /30(分不出可用地址)时返回错误,由调用方
+// 转 ICS 静态探测。
+func (this *UsbGadgetRndis) applyDhcpLease(ifname string, subnet, router netip.Addr, dns []netip.Addr) error {
 	prefix, ok := maskToPrefix(subnet)
 	if !ok {
-		log.Printf("WARN: non-contiguous subnet mask %s, fallback to gateway mode\n", subnet)
-		return this.fallbackToGatewayMode()
+		return fmt.Errorf("non-contiguous subnet mask %s", subnet)
 	}
 	if prefix >= 30 { // /30 只有 2 个可用地址,没有分配给客户端的余量
-		log.Printf("WARN: upstream prefix /%d too small, fallback to gateway mode\n", prefix)
-		return this.fallbackToGatewayMode()
+		return fmt.Errorf("upstream prefix /%d too small", prefix)
 	}
 
 	// 探测成功:清掉临时地址,换成计算出的地址
@@ -331,8 +351,7 @@ func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 	ip := calcClientIP(network, prefix, this.client_ip)
 	ipSpec := fmt.Sprintf("%s/%d", ip, prefix)
 	if err := addIfaceAddr(ifname, ipSpec); err != nil {
-		log.Printf("WARN: %v, fallback to gateway mode\n", err)
-		return this.fallbackToGatewayMode()
+		return err
 	}
 	if out, err := exec.Command("ip", "route", "add", "default", "via", router.String(), "dev", ifname).CombinedOutput(); err != nil {
 		log.Printf("WARN: `ip route add default via %s dev %s`: %v, output: %s\n", router, ifname, err, string(out))
@@ -342,6 +361,82 @@ func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 	this.applyDns(dns, router)
 	log.Printf("INFO: rndis client mode: %s, gateway %s\n", ipSpec, router)
 	return nil
+}
+
+// enableIcsStaticMode 无可用 DHCP 时静态接入 Windows ICS 网段:
+// --rndis-client-ip 的主机字节配 192.168.137.xx/24(ICS 共享端固定
+// 192.168.137.1/24),DNS 探测网关确认 ICS 真在(host 开了共享但 DHCP
+// 分配器不可用时链路仍可达);探测失败说明 host 既无 DHCP 也没开
+// ICS,回退主模式保可达。不用 ping 探测:Win7 防火墙默认丢入站 ICMP
+// (实测主机能 ping 通 stick、stick ping 不通 .1,但 TCP/UDP 正常)。
+func (this *UsbGadgetRndis) enableIcsStaticMode(ifname string) error {
+	gateway := netip.AddrFrom4([4]byte{192, 168, 137, 1})
+
+	host := this.client_ip.As4()[3] // 传入 IP 的主机字节(0.0.0.33 → 33)
+	ip := netip.AddrFrom4([4]byte{192, 168, 137, host})
+	ipSpec := fmt.Sprintf("%s/24", ip)
+
+	// 清掉探测用的临时地址(--rndis-ip),换成 ICS 网段地址
+	if out, err := exec.Command("ip", "addr", "flush", "dev", ifname).CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip addr flush dev %s`: %v, output: %s\n", ifname, err, string(out))
+	}
+	if err := addIfaceAddr(ifname, ipSpec); err != nil {
+		log.Printf("WARN: %v, fallback to gateway mode\n", err)
+		return this.fallbackToGatewayMode()
+	}
+
+	if !this.probeIcsDns(gateway, 2*time.Second) {
+		log.Printf("WARN: ics gateway %s has no DNS proxy, fallback to gateway mode\n", gateway)
+		return this.fallbackToGatewayMode()
+	}
+
+	if out, err := exec.Command("ip", "route", "add", "default", "via", gateway.String(), "dev", ifname).CombinedOutput(); err != nil {
+		log.Printf("WARN: `ip route add default via %s dev %s`: %v, output: %s\n", gateway, ifname, err, string(out))
+	}
+	// 无 DHCP 就没有上游 DNS,ICS 主机自带 DNS 代理,指向网关
+	this.applyDns(nil, gateway)
+	log.Printf("INFO: rndis client mode (ics static): %s, gateway %s\n", ipSpec, gateway)
+	return nil
+}
+
+// probeIcsDns 向 gateway:53 发一个 DNS query,收到任何回复(UDP 包,
+// 哪怕是 REFUSED)即认为 ICS DNS 代理活着。ICS 启用时 DNS 代理固定
+// 监听共享网卡 UDP 53,且 ICS 自动在防火墙放行本网段到 53 的流量
+// (它自己依赖)——比 ping 网关可靠,也比探测 DHCP 67 有意义:
+// DNS 代理不通就没有 DNS,配了静态也上不了网。无服务时 UDP 会收到
+// ICMP port unreachable(Read 报错)或超时,两种情况都返回 false。
+func (this *UsbGadgetRndis) probeIcsDns(gateway netip.Addr, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("udp4", net.JoinHostPort(gateway.String(), "53"), timeout)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return false
+	}
+	if _, err := conn.Write(dnsQuery("dns.msftncsi.com")); err != nil {
+		return false
+	}
+	reply := make([]byte, 512)
+	n, err := conn.Read(reply)
+	return err == nil && n > 0
+}
+
+// dnsQuery 手工构造最小 DNS query(id 固定,IANA 保留校验和可乱写;
+// 探测只关心有没有回复,不需要解析内容)。
+func dnsQuery(name string) []byte {
+	buf := []byte{0x12, 0x34, // id(任意)
+		0x01, 0x00, // flags: RD
+		0x00, 0x01, // QDCOUNT = 1
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00} // AN/NS/AR = 0
+	for _, label := range strings.Split(name, ".") {
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, label...)
+	}
+	buf = append(buf, 0x00)                   // root
+	buf = append(buf, 0x00, 0x01, 0x00, 0x01) // QTYPE A, QCLASS IN
+	return buf
 }
 
 // fallbackToGatewayMode 从模式回退:submode 直接跳回 0(回退后 LED 显示
@@ -494,7 +589,14 @@ func (this *UsbGadgetRndis) probeUpstreamDhcp(ifname string, timeout time.Durati
 	}
 	out, err := exec.CommandContext(ctx, "udhcpc", args...).CombinedOutput()
 	if err != nil {
-		return netip.Addr{}, netip.Addr{}, nil, fmt.Errorf("udhcpc on %s: %v, output: %s", ifname, err, string(out))
+		// 探测预算耗尽时 CommandContext 会 SIGKILL udhcpc(err 只有
+		// "signal: killed"),补上真实原因(context deadline)方便排查
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("udhcpc on %s: %w (probe budget %s exhausted), output: %s", ifname, ctxErr, timeout, string(out))
+		} else {
+			err = fmt.Errorf("udhcpc on %s: %w, output: %s", ifname, err, string(out))
+		}
+		return netip.Addr{}, netip.Addr{}, nil, err
 	}
 
 	var subnet, router net.IP

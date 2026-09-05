@@ -37,10 +37,10 @@
 | 模式  | 子模式  | 行为                                                                                                                         |
 | :---- | :------ | :--------------------------------------------------------------------------------------------------------------------------- |
 | RNDIS | 0(默认) | 网关模式:接口配 `--rndis-ip`,启动 dnsmasq 作 DHCP 服务器                                                                     |
-| RNDIS | 1       | 从模式:udhcpc 探测上游 DHCP → 按 `--rndis-client-ip` 模板配客户端 IP + 默认路由,上游 DNS 直写 `/etc/resolv.conf`(离开时还原) |
+| RNDIS | 1       | 从模式:udhcpc 探测上游 DHCP → 成功则按 `--rndis-client-ip` 模板配客户端 IP + 默认路由,上游 DNS 直写 `/etc/resolv.conf`(离开时还原);失败则静态接入 Windows ICS 网段 `192.168.137.<client_ip 末字节>/24` 并 UDP 探测 `.1:53`(ICS DNS 代理)验证(见下) |
 | ADB   | 0       | ADB 模式,无子模式                                                                                                            |
 
-- 从模式探测失败(网卡未就绪、非连续掩码、前缀 ≥ /30)自动回退网关模式,保证 stick 始终可达。
+- 从模式三级探测:DHCP 不可用(超时、掩码非连续、前缀 ≥ /30)→ 静态配 `192.168.137.xx/24`(xx 取 `--rndis-client-ip` 末字节)并 UDP 探测 `192.168.137.1:53`(Windows ICS 共享端固定地址,其 DNS 代理固定监听 53——不用 ping:Win7 防火墙默认丢入站 ICMP)→ DNS 代理不通(host 既无 DHCP 也没开 ICS)才回退网关模式,保证 stick 始终可达。
 - 子模式通过 `MaxSubmode()` 有界循环(`RNDIS` 0↔1),`enable()` 只会看到合法值。
 
 ## LED 显示
@@ -101,7 +101,7 @@
 | `--rndis-device-mac`       | `02:12:34:56:78:9a`                | 设备侧 RNDIS 接口 MAC                               |
 | `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                    |
 | `-a, --rndis-ip`           | `10.22.33.1/24`                    | RNDIS 接口 IP(带前缀),DHCP 池由此自动推导           |
-| `--rndis-client-ip`        | `0.0.0.33`                         | 从模式客户端 IP 模板,0 字节取上游网段字节           |
+| `--rndis-client-ip`        | `0.0.0.33`                         | 从模式客户端 IP:模板(DHCP 租约时 0 字节取上游网段字节),末字节用于 ICS 静态探测(`192.168.137.x`) |
 | `--rndis-client-timeout`   | `5s`                               | 从模式总超时(等网卡 + DHCP 探测)                    |
 | `-i, --rndis-ifname`       | `usb0`                             | RNDIS 接口名,`ip link` 可查                         |
 | `--rndis-qmult`            | `8`                                | usb ifname qmult(队列长度乘数),0 不写               |
