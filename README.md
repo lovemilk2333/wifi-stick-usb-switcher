@@ -40,7 +40,7 @@
 | RNDIS | 1       | 从模式:udhcpc 探测上游 DHCP → 成功则按 `--rndis-client-ip` 模板配客户端 IP + 默认路由,上游 DNS 直写 `/etc/resolv.conf`(离开时还原);失败则静态接入 Windows ICS 网段 `192.168.137.<client_ip 末字节>/24` 并 UDP 探测 `.1:53`(ICS DNS 代理)验证(见下) |
 | ADB   | 0       | ADB 模式,无子模式                                                                                                            |
 
-- 从模式三级探测:DHCP 不可用(超时、掩码非连续、前缀 ≥ /30)→ 静态配 `192.168.137.xx/24`(xx 取 `--rndis-client-ip` 末字节)并 UDP 探测 `192.168.137.1:53`(Windows ICS 共享端固定地址,其 DNS 代理固定监听 53——不用 ping:Win7 防火墙默认丢入站 ICMP)→ DNS 代理不通(host 既无 DHCP 也没开 ICS)才回退网关模式,保证 stick 始终可达。
+- 从模式三级探测:DHCP 不可用(超时、掩码非连续、前缀 ≥ /30)→ 静态配 `192.168.137.xx/24`(xx 取 `--rndis-client-ip` 末字节)并 UDP 探测 `192.168.137.1:53`(Windows ICS 共享端固定地址,其 DNS 代理固定监听 53)——不用 ping 探测:实测从模式下主机能 ping 通 stick、stick ping 不通 `.1`(Win7 侧对入站 ICMP 无响应),而 UDP 探测只依赖 ICS 必有组件 → DNS 代理不通(host 既无 DHCP 也没开 ICS)才回退网关模式,保证 stick 始终可达。
 - 子模式通过 `MaxSubmode()` 有界循环(`RNDIS` 0↔1),`enable()` 只会看到合法值。
 
 ## LED 显示
@@ -115,9 +115,9 @@
 | `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                     |
 | `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)          |
 | `--tick-rate`              | `50ms`                             | daemon 事件循环 tick 间隔                           |
-| `--shutdown-threshold`     | `10s`                              | 长按关机阈值,必须 > `--long-tap-threshold`,`0` 禁用 |
+| `--shutdown-threshold`     | `5s`                               | 长按关机阈值,必须 > `--long-tap-threshold`,`0` 禁用 |
 | `--shutdown-command`       | `poweroff`                         | 长按关机时执行的命令                                |
-| `--shutdown-shell`         | `/bin/bash`                        | 执行关机命令的 shell                                |
+| `--shell`                  | `/bin/bash`                        | 执行关机命令的 shell,`$SHELL` 环境变量优先          |
 
 ### `cli ipc <command> [args]`
 
@@ -185,6 +185,7 @@
 - **进程管理**:adbd 和 dnsmasq 都通过 pid 文件 + `/proc/<pid>/cmdline` 校验来追踪,pid 复用也不会误杀无关进程;不会无差别 killall。
 - **LED 失败容错**:LED 节点初始化失败(systemd 开机时序 sysfs 未就绪)时该槽位留 nil,所有遍历判空跳过,daemon 照常运行。
 - **子模式有界**:`UsbGadgetFunction` 暴露 `MaxSubmode()`(`RNDIS`=1),切换用 `(submode+1) % (MaxSubmode()+1)` 循环,防止无限递增撞上 `enable()` 不认识的值。
+- **RNDIS 枚举对齐真实 Android 手机 USB 共享**:`idVendor/idProduct` 固定 `0x18d1:0x4ee4`(Google Nexus/Pixel tether+debug,Windows 有现成驱动映射)、设备级 class 0/0/0(分类全在接口级;此前写 `EF/02/01` 时 Win7 开 ICS 后 RNDIS 驱动空指针蓝屏,手机不会)、`bcdDevice 0x0223`、`MaxPower 500mA`,并带 MS OS Descriptor(`compatible_id "RNDIS"` + `sub_compatible_id "5162001"`,Windows 免 INF 自动加载 usb8023/rndismp 驱动,没有 os_desc 时设备管理器显示"其他设备"代码 28)。设备枚举为双接口:Wireless(RNDIS 通信)+ CDC Data。
 
 ## 目录结构
 
