@@ -2,6 +2,8 @@
 
 通过 Wifi Stick 上的物理按钮切换 USB Gadget 模式,并可通过 IPC 查询/控制
 
+> 要获取完整的配置流程, 以及更新更为及时的文档, 请参阅 <https://aka.lovemilk.top/notes/posts/deployment/wifistick/installation/>
+
 ## 工作原理
 
 ```
@@ -86,7 +88,108 @@ flowchart TD
 
 ## 部署
 
-把 `build/arm64/cli` 传到设备(例如 `scp`,或参考 `scripts/mutagen-create-sync-arm64.sh.example` 做自动同步),然后在设备上运行:
+### 1. 安装运行时依赖
+
+```bash
+sudo apt install dnsmasq udhcpc iproute2
+```
+
+- `dnsmasq`:RNDIS 网关模式的 DHCP 服务器(USB host 从 stick 拿地址)
+- `udhcpc`:RNDIS 从模式的 DHCP 探测(`enableClientMode` 用它向 Windows ICS/上游要租约)
+- `iproute2`:`ip` 命令,配地址/路由的基础工具
+
+### 2. 安装二进制
+
+方式 A:从 [GitHub Releases](https://aka.lovemilk.top/github/wifi-stick-usb-switcher/releases/latest) 下载对应架构的可执行文件(注意不要拿错 `amd64` 版本),解压得到 `cli`。
+
+方式 B:自行交叉编译,见上文[构建](#构建),产物在 `build/arm64/cli`。
+
+安装为系统命令(下文以 `/usr/local/bin/usb-switcher` 为例):
+
+```bash
+sudo install -m 0755 cli /usr/local/bin/usb-switcher
+```
+
+### 3. 配置启动脚本
+
+> 参考 `scripts/start.sh.example`(参数化版本,可传 `$@` 覆盖参数)/ `scripts/test.sh.example`
+
+按需修改参数,写入:
+
+```path
+/usr/local/lib/usb-switcher/start.sh
+```
+
+```bash
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+exec /usr/local/bin/usb-switcher daemon \
+  --devnode /dev/input/event0 \
+  --led /sys/class/leds/blue:wifi \
+  --led /sys/class/leds/red:os \
+  --led /sys/class/leds/green:internet \
+  --config-fs /sys/kernel/config/usb_gadget/g1 \
+  "$@"
+```
+
+授予可执行权限:
+
+```bash
+sudo chmod +x /usr/local/lib/usb-switcher/start.sh
+```
+
+> [!NOTE]
+> - 至少提供 **2** 个 LED:`--led` 的顺序即主模式顺序,初始化时依次点亮,第 1 个 LED = RNDIS 模式、第 2 个 = ADB 模式(详见[按键行为](#按键行为)与[LED 显示](#led-显示))
+> - `exec` 是必须的:daemon 不 fork,脚本必须以 `exec` 替换自身进程,systemd 才能直接管理 pid/信号
+
+### 4. 创建 systemd 服务
+
+```path
+/etc/systemd/system/wifi-stick-usb-switcher.service
+```
+
+```ini
+[Unit]
+Description=wifi-stick-usb-switcher
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/usb-switcher/start.sh
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+重载并启用:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now wifi-stick-usb-switcher.service
+```
+
+> [!WARNING]
+> 若固件自带 USB gadget 初始化服务(如 `mobian-usb-gadget.service` / `mobian-setup-usb-network.service`),须先禁用,否则会与 daemon 抢 configfs/接口:
+>
+> ```bash
+> sudo systemctl disable --now mobian-usb-gadget.service
+> sudo systemctl disable --now mobian-setup-usb-network.service
+> ```
+
+### 5. 验证
+
+```bash
+systemctl status wifi-stick-usb-switcher
+journalctl -u wifi-stick-usb-switcher -f   # 看到 "INFO daemon started" + 模式切换日志
+/usr/local/bin/usb-switcher ipc toggle-led 0   # 与 daemon 的 IPC 握手,输出 "led: on"
+```
+
+### 6. 调试 / 前台运行
+
+不想装 systemd 时,把二进制传到设备(例如 `scp`,或参考 `scripts/mutagen-create-sync-arm64.sh.example` 做自动同步),前台运行:
 
 ```bash
 ./cli daemon --devnode /dev/input/event0 \
@@ -97,7 +200,9 @@ flowchart TD
   --ifname usb0
 ```
 
-完整示例见 `scripts/test.sh.example`(gdbserver 版本见 `scripts/test-gdbserver.sh.example`)。`tests/virtual-button/virtual_button.py` 是虚拟按键注入工具,用于无实体按键时测试。
+gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-button/virtual_button.py` 是虚拟按键注入工具,用于无实体按键时测试。
+
+全部参数见[命令行参数](#命令行参数);IPC 命令见[`cli ipc`](#cli-ipc-command-args)。
 
 ## 命令行参数
 
@@ -225,7 +330,9 @@ tests/virtual-button/   # 虚拟按键注入工具
 | 工具                    | 系统预装 | 简介                                                       | URL                               |
 | :---------------------- | :------: | :--------------------------------------------------------- | :-------------------------------- |
 | `/usr/bin/gc`           |    是    | HandsomeMod 的 Gadget Controller,用于创建/解析 gadget 配置 | https://github.com/HandsomeMod/gc |
-| `dnsmasq`               |    是    | RNDIS 接口的 DHCP 服务器                                   |                                   |
+| `dnsmasq`               |    否    | RNDIS 接口的 DHCP 服务器(`apt install dnsmasq`)            |                                   |
+| `udhcpc`                |    否    | RNDIS 从模式的 DHCP 探测(`apt install udhcpc`)             |                                   |
+| `iproute2`              |    否    | `ip` 命令,配地址/路由(`apt install iproute2`)              |                                   |
 | `adbd`                  |    是    | ADB 模式下的 device 端守护进程                             |                                   |
 | `aarch64-linux-gnu-gcc` |    否    | 交叉编译 arm64 时需要                                      |                                   |
 
