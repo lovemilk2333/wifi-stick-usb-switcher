@@ -22,14 +22,16 @@
 按钮的状态转换:
 
 ```mermaid
-stateDiagram-v2
-    [*] --> 常规: daemon 启动
-    常规 --> 常规: 短按 = 切下一个主模式<br/>(RNDIS ↔ ADB,重建 gadget)
-    常规 --> 子模式选择: 长按 ≥ long-tap-threshold<br/>(LED 先灭 750ms 提示)
-    子模式选择 --> 子模式选择: 短按 = submode 有界循环<br/>(RNDIS 0↔1;不重建 gadget,直接重配网络)
-    子模式选择 --> 常规: 长按退出<br/>(LED 显示当前 submode 状态)
-    常规 --> 关机: 按住 ≥ shutdown-threshold(5s)<br/>(不松手,KEY_RESTART 松开会触发系统重启)
-    关机 --> [*]: 立即关机流程<br/>(LED 反向逐颗亮起 → 执行 --shutdown-command)
+flowchart TD
+    S([daemon 启动]) --> N[常规模式]
+    N -- 短按 --> N1[切换下一个主模式<br/>RNDIS ↔ ADB]
+    N1 --> N
+    N -- 长按 ≥ 阈值 --> M[子模式选择]
+    M -- 短按 --> M1[循环切换 submode<br/>0 ↔ 1]
+    M1 --> M
+    M -- 长按 --> N
+    N -- 按住 ≥ shutdown-threshold<br/>不松手 --> K[立即关机]
+    K --> X([退出])
 ```
 
 - 短按切换在**子模式选择状态中**不切主模式,而是循环 submode(选择状态优先)。
