@@ -36,6 +36,15 @@ jobs:
                       gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
                       meson ninja-build
 
+            - name: Install Zig (arm64 cross to glibc 2.31)
+              run: |
+                  mkdir -p "$HOME/tools"
+                  curl -sL -o /tmp/zig.tar.xz \
+                      https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+                  tar -C "$HOME/tools" -xf /tmp/zig.tar.xz
+                  mv "$HOME/tools/zig-x86_64-linux-0.14.1" "$HOME/tools/zig"
+                  "$HOME/tools/zig/zig" version
+
             - name: Run Build Script
               run: |
                   chmod +x ./build.sh
