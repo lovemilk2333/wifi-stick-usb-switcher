@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func normalizeMAC(s string) string {
+func normalize_mac(s string) string {
 	parts := strings.Split(s, ":")
 	if len(parts) != 6 {
 		return s
@@ -24,8 +24,8 @@ func AdaptUsbGadgetFunction(_type string, instance string, fields map[string]str
 	switch _type {
 	case "rndis":
 		rndis := SnapshotUsbGadgetRndis(instance)
-		rndis.dev_addr = normalizeMAC(fields["dev_addr"])
-		rndis.host_addr = normalizeMAC(fields["host_addr"])
+		rndis.dev_addr = normalize_mac(fields["dev_addr"])
+		rndis.host_addr = normalize_mac(fields["host_addr"])
 		rndis.ifname = fields["ifname"]
 		rndis.qmult = fields["qmult"]
 

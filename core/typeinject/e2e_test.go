@@ -313,10 +313,10 @@ func TestDepInjectValidationStructMixedFields(t *testing.T) {
 	}
 
 	cases := map[string]validationConfig{
-		"missing name":    {Email: "a@b.com", Port: 80, Protocol: "tcp"},
-		"bad email":       {Name: "x", Email: "nope", Port: 80, Protocol: "tcp"},
-		"port too low":    {Name: "x", Email: "a@b.com", Port: 0, Protocol: "tcp"},
-		"port too high":   {Name: "x", Email: "a@b.com", Port: 70000, Protocol: "tcp"},
+		"missing name":     {Email: "a@b.com", Port: 80, Protocol: "tcp"},
+		"bad email":        {Name: "x", Email: "nope", Port: 80, Protocol: "tcp"},
+		"port too low":     {Name: "x", Email: "a@b.com", Port: 0, Protocol: "tcp"},
+		"port too high":    {Name: "x", Email: "a@b.com", Port: 70000, Protocol: "tcp"},
 		"invalid protocol": {Name: "x", Email: "a@b.com", Port: 80, Protocol: "icmp"},
 	}
 	for name, cfg := range cases {
@@ -477,8 +477,8 @@ func TestDepInjectStructAndErrorReturn(t *testing.T) {
 }
 
 type collectionArg struct {
-	Items []int            `validate:"min=1,max=3"`
-	Tags  map[string]int   `validate:"min=1"`
+	Items []int          `validate:"min=1,max=3"`
+	Tags  map[string]int `validate:"min=1"`
 }
 
 func TestDepInjectSliceMapFieldValidation(t *testing.T) {
@@ -490,9 +490,9 @@ func TestDepInjectSliceMapFieldValidation(t *testing.T) {
 	}
 
 	cases := map[string]collectionArg{
-		"empty items":  {Items: []int{}, Tags: map[string]int{"a": 1}},
-		"too many":     {Items: []int{1, 2, 3, 4}, Tags: map[string]int{"a": 1}},
-		"empty tags":   {Items: []int{1}, Tags: map[string]int{}},
+		"empty items": {Items: []int{}, Tags: map[string]int{"a": 1}},
+		"too many":    {Items: []int{1, 2, 3, 4}, Tags: map[string]int{"a": 1}},
+		"empty tags":  {Items: []int{1}, Tags: map[string]int{}},
 	}
 	for name, cfg := range cases {
 		if _, err := invoke(t, fn, []any{cfg}); err == nil {
@@ -650,4 +650,3 @@ func TestCallFunctionJSONWithStatic(t *testing.T) {
 		t.Fatalf("unexpected %v", res[0].Interface())
 	}
 }
-

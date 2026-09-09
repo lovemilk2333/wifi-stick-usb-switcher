@@ -15,9 +15,9 @@
 
 ### 命名风格
 
-- **导出（公开）成员**：首字母大写的驼峰命名 `PascalCase`，如 `NewDevice`、`ClearFunctions`
-- **未导出（私有）成员**：首字母小写的驼峰命名 `camelCase`，如 `init()`、`loadLedInterpreters()`
-- **结构体字段**：无论是否导出，**私有字段**统一使用下划线命名 `snake_case`
+- **导出（公开）成员** / 公开函数：首字母大写的驼峰命名 `PascalCase`，如 `NewDevice`、`ClearFunctions`
+- **未导出（私有）成员** / 非公开函数: snake_case `snake_case`，如 `init()`、`load_led()`
+- **结构体字段**：**私有字段**统一使用下划线命名 `snake_case`
   - 正确：`input_device`、`current_mode`、`tick_rate`
   - 错误：`inputDevice`、`currentMode`、`tickRate`
   - 导出字段仍使用 PascalCase：`DeviceName`、`ConfigPath`

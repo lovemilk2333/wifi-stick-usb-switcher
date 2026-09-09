@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"runtime"
 
 	"github.com/alexflint/go-arg"
@@ -17,7 +18,7 @@ type VersionCmd struct{}
 var args struct {
 	Daemon  *daemon.DaemonCmd `arg:"subcommand:daemon"`
 	Version *VersionCmd       `arg:"subcommand:version"`
-	IPC     *ipc.IPCCmd        `arg:"subcommand:ipc"`
+	IPC     *ipc.IPCCmd       `arg:"subcommand:ipc"`
 }
 
 // https://github.com/xpzouying/golang-notes/issues/24
@@ -82,6 +83,15 @@ func main() {
 			log.Printf("cannot init daemon: %v", err)
 			os.Exit(2)
 		}
+
+		// SIGTERM/SIGINT → 优雅退出:Stop 关主循环,Mainloop 的 defer
+		// 清理运行时副作用(adbd/dnsmasq/functionfs),systemctl stop 干净
+		sig_chan := make(chan os.Signal, 1)
+		signal.Notify(sig_chan, unix.SIGTERM, unix.SIGINT)
+		go func() {
+			<-sig_chan
+			daemon.Stop()
+		}()
 
 		err = daemon.Mainloop()
 		if err != nil {

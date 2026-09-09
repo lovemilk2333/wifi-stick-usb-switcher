@@ -240,7 +240,7 @@ func ParseJsonPayload(function any, data []byte, static_types ...reflect.Type) (
 			continue
 		}
 
-		value, err := decodeJsonArgv(meta, raws[i])
+		value, err := decode_json_argv(meta, raws[i])
 		if err != nil {
 			return nil, fmt.Errorf("arg[%d] (%s) invalid: %w", i+len(static_types), meta.Type.Name(), err)
 		}
@@ -250,8 +250,8 @@ func ParseJsonPayload(function any, data []byte, static_types ...reflect.Type) (
 	return result, nil
 }
 
-// decodeJsonArgv decodes one JSON element into meta's type.
-func decodeJsonArgv(meta *DepInjectFieldMetadata, raw json.RawMessage) (any, error) {
+// decode_json_argv decodes one JSON element into meta's type.
+func decode_json_argv(meta *DepInjectFieldMetadata, raw json.RawMessage) (any, error) {
 	if meta.Type.Kind() == reflect.Struct {
 		ptr := reflect.New(meta.Type)
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -302,7 +302,7 @@ func ParseJsonPayloadWithMetas(metas DepInjectFieldMetadatas, data []byte) ([]an
 			continue
 		}
 
-		value, err := decodeJsonArgv(meta, raws[i])
+		value, err := decode_json_argv(meta, raws[i])
 		if err != nil {
 			return nil, fmt.Errorf("arg[%d] (%s) invalid: %w", i, meta.Type.Name(), err)
 		}

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func newTestDevice() *InputDevice {
+func new_test_device() *InputDevice {
 	return &InputDevice{
 		Config:      &InputDeviceConfig{MultipleTapThreshold: -1, LongTapThreshold: 300 * time.Millisecond},
 		event_queue: list.New(),
@@ -14,7 +14,7 @@ func newTestDevice() *InputDevice {
 }
 
 func TestInjectEvent(t *testing.T) {
-	dev := newTestDevice()
+	dev := new_test_device()
 
 	dev.InjectEvent(&InputEvent{Type: INPUT_TAP, Status: DEVICE_STATUS_NORMAL})
 	events := dev.Tick()
@@ -30,7 +30,7 @@ func TestInjectEvent(t *testing.T) {
 }
 
 func TestInjectPress(t *testing.T) {
-	dev := newTestDevice()
+	dev := new_test_device()
 
 	dev.InjectPress(5 * time.Second)
 	st := dev.State()

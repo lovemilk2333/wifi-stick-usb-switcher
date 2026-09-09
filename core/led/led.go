@@ -76,7 +76,7 @@ returns: active trigger, available triggers (includes active), error
 
 NOTE: if no active trigger found, active trigger well be `""`
 */
-func (this *Led) parseTriggers(triggers []byte) (LedTrigger, []LedTrigger, error) {
+func (this *Led) parse_triggers(triggers []byte) (LedTrigger, []LedTrigger, error) {
 	var active_trigger LedTrigger
 
 	available_triggers := make([]LedTrigger, 0, bytes.Count(triggers, []byte{TRIGGER_SEP})+1)
@@ -113,13 +113,13 @@ func (this *Led) parseTriggers(triggers []byte) (LedTrigger, []LedTrigger, error
 	return active_trigger, available_triggers, nil
 }
 
-func (this *Led) loadAvailableTriggers() (LedTrigger, []LedTrigger, error) {
+func (this *Led) load_available_triggers() (LedTrigger, []LedTrigger, error) {
 	data, err := this.ReadSubpath(base.Subpath(LED_SUBPATH_TRIGGER), false)
 	if err != nil {
 		return "", nil, err
 	}
 
-	active_trigger, available_triggers, err := this.parseTriggers(data)
+	active_trigger, available_triggers, err := this.parse_triggers(data)
 	if err != nil {
 		return "", nil, err
 	}
@@ -127,7 +127,7 @@ func (this *Led) loadAvailableTriggers() (LedTrigger, []LedTrigger, error) {
 	return active_trigger, available_triggers, nil
 }
 
-func (this *Led) parseBrightness(subpath LedSubpath) (LedBrightness, error) {
+func (this *Led) parse_brightness(subpath LedSubpath) (LedBrightness, error) {
 	is_max_brightness := false
 	switch subpath {
 	case LED_SUBPATH_BRIGHTNESS: // pass
@@ -157,13 +157,13 @@ func (this *Led) parseBrightness(subpath LedSubpath) (LedBrightness, error) {
 	return LedBrightness(brightness), nil
 }
 
-func (this *Led) loadBrightness() (LedBrightness, LedBrightness, error) {
-	brightness, err := this.parseBrightness(LED_SUBPATH_BRIGHTNESS)
+func (this *Led) load_brightness() (LedBrightness, LedBrightness, error) {
+	brightness, err := this.parse_brightness(LED_SUBPATH_BRIGHTNESS)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	max_brightness, err := this.parseBrightness(LED_SUBPATH_MAX_BRIGHTNESS)
+	max_brightness, err := this.parse_brightness(LED_SUBPATH_MAX_BRIGHTNESS)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -171,13 +171,13 @@ func (this *Led) loadBrightness() (LedBrightness, LedBrightness, error) {
 	return brightness, max_brightness, nil
 }
 
-func (this *Led) updateAttr() error {
-	active_trigger, available_triggers, err := this.loadAvailableTriggers()
+func (this *Led) update_attr() error {
+	active_trigger, available_triggers, err := this.load_available_triggers()
 	if err != nil {
 		return err
 	}
 
-	brightness, max_brightness, err := this.loadBrightness()
+	brightness, max_brightness, err := this.load_brightness()
 	if err != nil {
 		return err
 	}
@@ -199,8 +199,8 @@ func (this *Led) GetMaxBrightness() LedBrightness {
 	return this.max_brightness
 }
 
-func (this *Led) getTrigger() (LedTrigger, error) {
-	current_trigger, available_triggers, err := this.loadAvailableTriggers()
+func (this *Led) get_trigger() (LedTrigger, error) {
+	current_trigger, available_triggers, err := this.load_available_triggers()
 	if err != nil {
 		return "", err
 	}
@@ -211,8 +211,8 @@ func (this *Led) getTrigger() (LedTrigger, error) {
 	return current_trigger, nil
 }
 
-func (this *Led) setTrigger(trigger LedTrigger) error {
-	err := this.updateAttr()
+func (this *Led) set_trigger(trigger LedTrigger) error {
+	err := this.update_attr()
 	if err != nil {
 		return err
 	}
@@ -230,7 +230,7 @@ func (this *Led) setTrigger(trigger LedTrigger) error {
 		return err
 	}
 
-	current_trigger, available_triggers, err := this.loadAvailableTriggers()
+	current_trigger, available_triggers, err := this.load_available_triggers()
 	if err != nil {
 		return err
 	}
@@ -245,8 +245,8 @@ func (this *Led) setTrigger(trigger LedTrigger) error {
 	return nil
 }
 
-func (this *Led) getBrightness() (LedBrightness, error) {
-	current_brightness, max_brightness, err := this.loadBrightness()
+func (this *Led) get_brightness() (LedBrightness, error) {
+	current_brightness, max_brightness, err := this.load_brightness()
 	if err != nil {
 		return 0, err
 	}
@@ -257,13 +257,13 @@ func (this *Led) getBrightness() (LedBrightness, error) {
 	return current_brightness, nil
 }
 
-func (this *Led) setBrightness(brightness LedBrightness) error {
+func (this *Led) set_brightness(brightness LedBrightness) error {
 	err := this.WriteSubpath(base.Subpath(LED_SUBPATH_BRIGHTNESS), true, []byte(strconv.FormatUint(uint64(brightness), 10)+"\n"))
 	if err != nil {
 		return err
 	}
 
-	current_brightness, max_brightness, err := this.loadBrightness()
+	current_brightness, max_brightness, err := this.load_brightness()
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func NewLed(devnode string) (*Led, error) {
 		return nil, err
 	}
 
-	err = led.updateAttr()
+	err = led.update_attr()
 	if err != nil {
 		return nil, err
 	}

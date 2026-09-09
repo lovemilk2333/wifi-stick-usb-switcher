@@ -111,12 +111,12 @@ func RegisterHandler(package_type daemonipc.IPCPackageType, builder any) {
 }
 
 func init() {
-	RegisterHandler(daemonipc.PACKAGE_TOGGLE_LED, buildToggleLed)
-	RegisterHandler(daemonipc.PACKAGE_SIMULATE_BUTTON, buildTap)
+	RegisterHandler(daemonipc.PACKAGE_TOGGLE_LED, build_toggle_led)
+	RegisterHandler(daemonipc.PACKAGE_SIMULATE_BUTTON, build_tap)
 }
 
-// buildTap maps a CLI subcommand to a SimulateButtonTarget (+ count for multi).
-func buildTap(action string, count string) ([]any, error) {
+// build_tap maps a CLI subcommand to a SimulateButtonTarget (+ count for multi).
+func build_tap(action string, count string) ([]any, error) {
 	action = strings.ToLower(strings.TrimSpace(action))
 	switch action {
 	case "", "-", "tap":
@@ -142,8 +142,8 @@ func buildTap(action string, count string) ([]any, error) {
 	}
 }
 
-// buildToggleLed maps a CLI state string to a ToggleLEDTarget.
-func buildToggleLed(state string) ([]any, error) {
+// build_toggle_led maps a CLI state string to a ToggleLEDTarget.
+func build_toggle_led(state string) ([]any, error) {
 	state = strings.ToLower(strings.TrimSpace(state))
 	var target daemonipc.ToggleLEDTarget
 	switch state {
@@ -217,9 +217,9 @@ type IPCCommandDesc struct {
 	Args        []IPCCommandArg
 }
 
-// describeType renders a builder parameter type, expanding struct fields so the
+// describe_type renders a builder parameter type, expanding struct fields so the
 // argv "struct" is visible in --list output.
-func describeType(t reflect.Type) string {
+func describe_type(t reflect.Type) string {
 	if t == nil {
 		return "any"
 	}
@@ -252,7 +252,7 @@ func ListCommands() []IPCCommandDesc {
 					if meta == nil {
 						continue
 					}
-					desc.Args = append(desc.Args, IPCCommandArg{Type: describeType(meta.Type)})
+					desc.Args = append(desc.Args, IPCCommandArg{Type: describe_type(meta.Type)})
 				}
 			}
 		}

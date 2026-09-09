@@ -34,7 +34,6 @@ type DaemonCmd struct {
 	LedBlinkInterval     time.Duration    `arg:"--led-blink-interval" help:"led blink interval, the dark duration of led when blinking" default:"300ms"`
 	SubmodeLedDuration   time.Duration    `arg:"--submode-led-duration" help:"led off duration when entering submode selection, before showing the submode state" default:"750ms"`
 	UsbConfigFs          string           `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
-	GcPath               string           `arg:"-g,--gc-path" default:"gc" help:"gadget controller (https://github.com/HandsomeMod/gc) path or ELF name which can be found in $PATH"`
 	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
 	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
@@ -68,11 +67,11 @@ type Daemon struct {
 	current_mode  int
 	mode_changed  bool
 	mode_changing bool
-	// submode 选择中的切换(submode_changed):函数不变,applyFunction
+	// submode 选择中的切换(submode_changed):函数不变,apply_function
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
 	submode_changed  bool
-	turn_off_leds    atomic.Bool // IPC goroutine 写、applyFunction goroutine 读,需原子
+	turn_off_leds    atomic.Bool // IPC goroutine 写、apply_function goroutine 读,需原子
 	tick_interval    time.Duration
 	daemonipc_config *ipc.ServerConfig
 
@@ -98,6 +97,19 @@ type Daemon struct {
 	shutdown_shell     string
 	shutdown_timeout   time.Duration
 	shutting_down      bool
+
+	// stop_chan 由 Stop()(SIGTERM/SIGINT)关闭,Mainloop select 退出,
+	// defer 统一清理运行时副作用 —— systemctl stop 不再强杀留残留
+	stop_chan chan struct{}
+}
+
+// Stop 请求 daemon 优雅退出(幂等)。
+func (this *Daemon) Stop() {
+	select {
+	case <-this.stop_chan:
+	default:
+		close(this.stop_chan)
+	}
 }
 
 // LED_SUBMODE_MODES 是 submode 对应的 LED 显示模式,index = submode % 2:
@@ -108,7 +120,9 @@ var LED_SUBMODE_MODES = []*led.LedMode{
 }
 
 func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
-	daemon := &Daemon{}
+	daemon := &Daemon{
+		stop_chan: make(chan struct{}),
+	}
 
 	if err := daemon.init(cmd); err != nil {
 		return nil, err
@@ -123,7 +137,7 @@ func (this *Daemon) GetTurnOffLeds() bool {
 // SimulateButton injects a synthetic button action, reusing the physical-button
 // path: tap/long push an event into the input queue (processed by Tick on the
 // mainloop, no shared-state race); shutdown simulates a held button long enough
-// for the mainloop's shutdown check to fire doShutdown; multi injects `count`
+// for the mainloop's shutdown check to fire do_shutdown; multi injects `count`
 // taps that the input chain-merge turns into a single INPUT_MULTIPLE_TAP.
 func (this *Daemon) SimulateButton(target daemonipc.SimulateButtonTarget, count int) error {
 	now := time.Now()
@@ -170,18 +184,18 @@ func (this *Daemon) SimulateButton(target daemonipc.SimulateButtonTarget, count 
 
 func (this *Daemon) SetTurnOffLeds(off bool) {
 	this.turn_off_leds.Store(off)
-	this.applyLedState() // IPC 线程改完立即生效,不等下一次模式切换
+	this.apply_led_state() // IPC 线程改完立即生效,不等下一次模式切换
 }
 
-// applyLedState 按 turn_off_leds 立即设置当前 LED:关 / 显示 submode 状态。
-// 由 IPC handler(goroutine)调用,与 Tick/applyFunction 的并发是既有模型。
-func (this *Daemon) applyLedState() {
-	if interpreter := this.currentInterpreter(); interpreter != nil {
+// apply_led_state 按 turn_off_leds 立即设置当前 LED:关 / 显示 submode 状态。
+// 由 IPC handler(goroutine)调用,与 Tick/apply_function 的并发是既有模型。
+func (this *Daemon) apply_led_state() {
+	if interpreter := this.current_interpreter(); interpreter != nil {
 		if this.turn_off_leds.Load() {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 			interpreter.Tick()
 		} else {
-			interpreter.SetMode(this.submodeLedMode())
+			interpreter.SetMode(this.submode_led_mode())
 			interpreter.Tick()
 		}
 	}
@@ -189,8 +203,13 @@ func (this *Daemon) applyLedState() {
 
 // Mainloop runs the daemon event loop at the configured tick rate.
 func (this *Daemon) Mainloop() error {
+	// 退出时清理本 daemon 启动的运行时副作用(adbd/dnsmasq/functionfs
+	// 挂载),否则 systemctl stop 强杀会残留,下次启动撞上(旧 adbd 占
+	// ep0、叠加挂载 → ADB 绑定失败)
+	defer usb.CleanupRuntime()
+
 	// IPC server 由独立 goroutine 托管(挂了自动重建),不阻塞主循环
-	go this.runIpcServer()
+	go this.run_ipc_server()
 
 	log.Printf("INFO daemon LED init\n")
 	for _, interpreter := range this.interpreters {
@@ -199,14 +218,14 @@ func (this *Daemon) Mainloop() error {
 		}
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
-	this.updateInterpreters()
+	this.update_interpreters()
 
 	for _, interpreter := range this.interpreters {
 		if interpreter == nil {
 			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
 		}
 		interpreter.SetMode(led.MODE_PRESET_ON)
-		this.updateInterpreters()
+		this.update_interpreters()
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
@@ -214,24 +233,28 @@ func (this *Daemon) Mainloop() error {
 	ticker := time.NewTicker(this.tick_interval)
 	defer ticker.Stop()
 
-	go this.applyFunction()
+	go this.apply_function()
 
 	log.Printf("INFO daemon started\n")
-	for range ticker.C {
-		this.Tick()
-		if this.shutting_down {
-			break // 关机流程(doShutdown 同步执行)已完成,退出主循环
+	for {
+		select {
+		case <-this.stop_chan:
+			log.Printf("INFO daemon stopped\n")
+			return nil
+		case <-ticker.C:
+			this.Tick()
+			if this.shutting_down {
+				return nil // 关机流程(do_shutdown 同步执行)已完成,退出主循环
+			}
 		}
 	}
-
-	return nil
 }
 
-// runIpcServer 持续提供 IPC server。golang-ipc 的 server 是一次性的:
+// run_ipc_server 持续提供 IPC server。golang-ipc 的 server 是一次性的:
 // 握手失败(旧 cli 二进制、cli 半途退出)会关闭 listener、框架 mainloop
 // 退出 —— 死掉就重建(socket 文件由库 run() 先 RemoveAll,无残留)。
 // daemon 主循环不依赖 IPC,IPC 故障不影响设备功能。
-func (this *Daemon) runIpcServer() {
+func (this *Daemon) run_ipc_server() {
 	for {
 		server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
 		if err != nil {
@@ -265,7 +288,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		return fmt.Errorf("`%s` is not a valid input device", cmd.Devnode)
 	}
 
-	if !this.isValidConfigFs(cmd.UsbConfigFs) {
+	if !this.is_valid_config_fs(cmd.UsbConfigFs) {
 		return fmt.Errorf("`%s` is not a valid config fs", cmd.UsbConfigFs)
 	}
 
@@ -340,7 +363,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	// ---- initialise USB gadget controller ---------------------------------
 
-	controller, err := usb.NewUsbGadgetController(cmd.UsbConfigFs, cmd.GcPath)
+	controller, err := usb.NewUsbGadgetController(cmd.UsbConfigFs)
 	if err != nil {
 		return fmt.Errorf("cannot init usb gadget: %w", err)
 	}
@@ -366,11 +389,11 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	// ---- initialise LEDs --------------------------------------------------
 
-	this.interpreters = loadLedInterpreters(cmd.Leds)
+	this.interpreters = load_led_interpreters(cmd.Leds)
 
 	// ---- init ipc ----
 	// InitClient 注册响应包的 payload struct 到全局表,server 端
-	// SendPackage 校验时需要;server handler 由 runIpcServer 每次注册
+	// SendPackage 校验时需要;server handler 由 run_ipc_server 每次注册
 	daemonipc.InitClient() // load client package definitions
 	this.daemonipc_config = &ipc.ServerConfig{
 		Encryption:        false,
@@ -380,12 +403,12 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	return nil
 }
 
-func (this *Daemon) applyFunction() {
+func (this *Daemon) apply_function() {
 	defer func() {
 		if r := recover(); r != nil {
 			// USB 操作链上的 panic 会杀整个进程,兜底;必须释放模式切换锁,
 			// 否则 mode_changing 卡死,之后再也切不了模式
-			log.Printf("WARN: applyFunction panic: %v", r)
+			log.Printf("WARN: apply_function panic: %v", r)
 			this.mode_changing = false
 		}
 	}()
@@ -396,18 +419,18 @@ func (this *Daemon) applyFunction() {
 	// ICS 需重新就绪,第一次探测必然失败)—— 直接在当前接口上重配网络
 	if this.submode_changed {
 		this.submode_changed = false
-		if interpreter := this.currentInterpreter(); interpreter != nil {
+		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
 		if err := this.controller.ReconfigureFunction(this.modes[this.current_mode]); err != nil {
 			log.Printf("WARN: cannot reconfigure function: %v\n", err)
 		}
 		if !this.turn_off_leds.Load() {
-			if interpreter := this.currentInterpreter(); interpreter != nil {
-				interpreter.SetMode(this.submodeLedMode())
+			if interpreter := this.current_interpreter(); interpreter != nil {
+				interpreter.SetMode(this.submode_led_mode())
 			}
 		} else {
-			if interpreter := this.currentInterpreter(); interpreter != nil {
+			if interpreter := this.current_interpreter(); interpreter != nil {
 				interpreter.SetMode(led.MODE_PRESET_OFF)
 			}
 		}
@@ -418,11 +441,11 @@ func (this *Daemon) applyFunction() {
 
 	// effect 期间:模式切换用快闪,子模式切换(选择状态中短按)用关闭 LED
 	if this.submode_selection {
-		if interpreter := this.currentInterpreter(); interpreter != nil {
+		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
 	} else {
-		if interpreter := this.currentInterpreter(); interpreter != nil {
+		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(LED_MODE_BLINK)
 		}
 	}
@@ -445,11 +468,11 @@ func (this *Daemon) applyFunction() {
 
 	// 完成后按 submode 显示 LED:0 常亮 / 1 慢闪(submode % 2 取 index)
 	if !this.turn_off_leds.Load() {
-		if interpreter := this.currentInterpreter(); interpreter != nil {
-			interpreter.SetMode(this.submodeLedMode())
+		if interpreter := this.current_interpreter(); interpreter != nil {
+			interpreter.SetMode(this.submode_led_mode())
 		}
 	} else {
-		if interpreter := this.currentInterpreter(); interpreter != nil {
+		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
 	}
@@ -458,9 +481,9 @@ func (this *Daemon) applyFunction() {
 	this.mode_changing = false
 }
 
-// submodeLedMode 返回当前主模式 submode 对应的 LED 模式。
+// submode_led_mode 返回当前主模式 submode 对应的 LED 模式。
 // submode 超出 1 用 % 2 取 index(0 -> 常亮,1 -> 慢闪)。
-func (this *Daemon) submodeLedMode() *led.LedMode {
+func (this *Daemon) submode_led_mode() *led.LedMode {
 	submode := this.modes[this.current_mode].GetSubmode()
 	index := submode % 2
 	if index < 0 { // SetSubmode 只递增,防御负数
@@ -469,9 +492,9 @@ func (this *Daemon) submodeLedMode() *led.LedMode {
 	return LED_SUBMODE_MODES[index]
 }
 
-// currentInterpreter 返回当前主模式对应的 LED interpreter。
+// current_interpreter 返回当前主模式对应的 LED interpreter。
 // 可能为 nil:LED 数量少于主模式数量,或该 LED 初始化失败。
-func (this *Daemon) currentInterpreter() *led.LedInterpreter {
+func (this *Daemon) current_interpreter() *led.LedInterpreter {
 	if this.current_mode < 0 || this.current_mode >= len(this.interpreters) {
 		return nil
 	}
@@ -490,7 +513,7 @@ func (this *Daemon) Tick() {
 		if st := this.input_device.State(); st != nil && st.Duration >= this.shutdown_threshold {
 			this.shutting_down = true
 			log.Printf("WARN: long-press shutdown triggered\n")
-			this.doShutdown() // 同步执行:完成后 Mainloop 检测 shutting_down 退出进程
+			this.do_shutdown() // 同步执行:完成后 Mainloop 检测 shutting_down 退出进程
 			return
 		}
 	}
@@ -524,7 +547,7 @@ func (this *Daemon) Tick() {
 			// 关闭期结束后(loop_count >= 1)显示 submode 状态
 			this.submode_selection = !this.submode_selection
 			this.submode_entry_done = false
-			if interpreter := this.currentInterpreter(); interpreter != nil {
+			if interpreter := this.current_interpreter(); interpreter != nil {
 				interpreter.SetMode(this.submode_entry_mode)
 			}
 		case input.INPUT_MULTIPLE_TAP:
@@ -538,9 +561,9 @@ func (this *Daemon) Tick() {
 	// loop_count >= 1 表示 submode_entry_mode(Off→Wait(duration)→On)
 	// 已完成一轮,即关闭了 submode_led_duration 时间。
 	if !this.submode_entry_done {
-		if interpreter := this.currentInterpreter(); interpreter != nil && interpreter.GetLoopCount() >= 1 {
+		if interpreter := this.current_interpreter(); interpreter != nil && interpreter.GetLoopCount() >= 1 {
 			this.submode_entry_done = true
-			interpreter.SetMode(this.submodeLedMode())
+			interpreter.SetMode(this.submode_led_mode())
 		}
 	}
 
@@ -554,7 +577,7 @@ func (this *Daemon) Tick() {
 			}
 		}
 
-		go this.applyFunction()
+		go this.apply_function()
 	}
 
 	for _, interpreter := range this.interpreters {
@@ -564,7 +587,7 @@ func (this *Daemon) Tick() {
 	}
 }
 
-func (this *Daemon) updateInterpreters() {
+func (this *Daemon) update_interpreters() {
 	for _, interpreter := range this.interpreters {
 		if interpreter == nil {
 			continue
@@ -573,7 +596,7 @@ func (this *Daemon) updateInterpreters() {
 	}
 }
 
-func (this *Daemon) doShutdown() {
+func (this *Daemon) do_shutdown() {
 	wait_shutdown := make(chan bool)
 
 	shell := strings.TrimSpace(this.shutdown_shell)
@@ -604,7 +627,7 @@ func (this *Daemon) doShutdown() {
 		}
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
-	this.updateInterpreters()
+	this.update_interpreters()
 
 	interpreter_length := len(this.interpreters)
 	for i := interpreter_length - 1; i >= 0; i-- {
@@ -614,7 +637,7 @@ func (this *Daemon) doShutdown() {
 		}
 		last_interpreter = interpreter
 		interpreter.SetMode(led.MODE_PRESET_ON)
-		this.updateInterpreters()
+		this.update_interpreters()
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
@@ -623,7 +646,7 @@ func (this *Daemon) doShutdown() {
 
 	if last_interpreter != nil { // keep last Led on to show if system is powered off
 		last_interpreter.SetMode(led.MODE_PRESET_ON)
-		this.updateInterpreters()
+		this.update_interpreters()
 	}
 
 	// waiting for shutdown
@@ -634,10 +657,10 @@ func (this *Daemon) doShutdown() {
 	}
 }
 
-// loadLedInterpreters 初始化每个 LED 设备;失败的槽位留 nil(消费方
+// load_led_interpreters 初始化每个 LED 设备;失败的槽位留 nil(消费方
 // 遍历时判空跳过),避免单颗 LED 故障(systemd 开机时序 sysfs 未就绪)
 // 拖垮整个 daemon。
-func loadLedInterpreters(ledDevnodes []string) []*led.LedInterpreter {
+func load_led_interpreters(ledDevnodes []string) []*led.LedInterpreter {
 	interpreters := make([]*led.LedInterpreter, len(ledDevnodes))
 
 	for index, ledDevnode := range ledDevnodes {
@@ -661,7 +684,7 @@ func loadLedInterpreters(ledDevnodes []string) []*led.LedInterpreter {
 	return interpreters
 }
 
-func (this *Daemon) isValidConfigFs(path string) bool {
+func (this *Daemon) is_valid_config_fs(path string) bool {
 	status := this.IsValidPath(path, "/sys/kernel/config/usb_gadget/", false, true)
 	if status == base.PATH_ERROR_NOT_EXISTS {
 		return true // gc -a will create the gadget directory

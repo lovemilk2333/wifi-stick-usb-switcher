@@ -21,6 +21,7 @@ jobs:
               uses: actions/checkout@v4
               with:
                   fetch-depth: 0
+                  submodules: recursive
 
             - name: Set up Go
               uses: actions/setup-go@v5
@@ -28,10 +29,12 @@ jobs:
                   go-version-file: "go.mod"
                   cache: true
 
-            - name: Install ARM64 Cross Compiler
+            - name: Install Toolchains (cross gcc/g++, meson/ninja for libusbgx)
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y gcc-aarch64-linux-gnu
+                  sudo apt-get install -y \
+                      gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                      meson ninja-build
 
             - name: Run Build Script
               run: |
@@ -49,6 +52,8 @@ jobs:
                   mkdir -p release_dist
 
                   tar -I zstd -cvf release_dist/cli-linux-amd64.tar.zst -C build/amd64 cli
+                  # arm64 cli 动态依赖 libusbgx.so.2:设备镜像已预装
+                  # (HandsomeMod 特制补丁版,不可替换/再分发),故不打进包
                   tar -I zstd -cvf release_dist/cli-linux-arm64.tar.zst -C build/arm64 cli
 
                   INPUT_TAG="${{ github.event.inputs.release_tag }}"

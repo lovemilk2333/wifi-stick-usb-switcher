@@ -80,9 +80,9 @@ func (this *InputDevice) check() error {
 	return nil
 }
 
-// resetPress 重置按压状态,必须在 lock 内调用(State 无锁读会撕裂,
+// reset_press 重置按压状态,必须在 lock 内调用(State 无锁读会撕裂,
 // 读到 pressed=true 但 press_start 已被清零 → 假超时长按)。
-func (this *InputDevice) resetPress() {
+func (this *InputDevice) reset_press() {
 	this.pressed = false
 	this.press_start = TIME_ZERO
 }
@@ -173,7 +173,7 @@ func (this *InputDevice) daemon() {
 				if this.long_tap_reported {
 					// LONG_TAP 已在按住时上报,松开只复位状态,不再产生事件
 					this.long_tap_reported = false
-					this.resetPress()
+					this.reset_press()
 					this.lock.Unlock()
 					continue
 				}
@@ -191,7 +191,7 @@ func (this *InputDevice) daemon() {
 					e.Type = INPUT_TAP
 				}
 
-				this.resetPress()
+				this.reset_press()
 				this.event_queue.PushBack(e)
 				this.lock.Unlock()
 			}
@@ -202,7 +202,7 @@ func (this *InputDevice) daemon() {
 			duration := now.Sub(this.press_start)
 			if duration >= this.Config.LongTapThreshold {
 				this.lock.Lock()
-				// 不 resetPress:保持 pressed=true 让 State() 继续反映按住状态
+				// 不 reset_press:保持 pressed=true 让 State() 继续反映按住状态
 				// (daemon 长按关机依赖),long_tap_reported 防重复上报
 				this.long_tap_reported = true
 				this.event_queue.PushBack(&InputEvent{
@@ -315,7 +315,7 @@ func (this *InputDevice) Tick() []*InputEvent {
 			(chain_length > 0 && event.Time.Sub(chain[chain_length-1].Time) > this.Config.MultipleTapThreshold) || // 有 `INPUT_TAP` 间隔过长功能打断
 			uint(chain_length) >= this.Config.MultipleTapMaxCount { // chain 太长打断
 			if chain_length > 0 {
-				mergeChainEvents(chain, &result)
+				merge_chain_events(chain, &result)
 				chain = chain[:0]
 			}
 			result = append(result, event)
@@ -329,7 +329,7 @@ func (this *InputDevice) Tick() []*InputEvent {
 		last := chain[len(chain)-1]
 
 		if now.Sub(last.Time) > this.Config.MultipleTapThreshold {
-			mergeChainEvents(chain, &result)
+			merge_chain_events(chain, &result)
 		} else {
 			for _, event := range chain {
 				this.event_queue.PushBack(event)
@@ -340,7 +340,7 @@ func (this *InputDevice) Tick() []*InputEvent {
 	return result
 }
 
-func mergeChainEvents(chain []*InputEvent, out *[]*InputEvent) {
+func merge_chain_events(chain []*InputEvent, out *[]*InputEvent) {
 	if len(chain) == 1 {
 		e := *chain[0]
 		e.Type = INPUT_TAP

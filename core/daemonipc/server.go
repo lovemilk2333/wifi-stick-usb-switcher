@@ -59,14 +59,14 @@ func InitServer(daemon daemonInterface) *IPCFramework {
 				daemon.SetTurnOffLeds(false)
 			}
 
-		return &IPCPackage{
-			Type: PACKAGE_TOGGLE_LED_RESP,
-			Payload: []any{ // Off or not
-				daemon.GetTurnOffLeds(),
-			},
-		}, nil
-	},
-)
+			return &IPCPackage{
+				Type: PACKAGE_TOGGLE_LED_RESP,
+				Payload: []any{ // Off or not
+					daemon.GetTurnOffLeds(),
+				},
+			}, nil
+		},
+	)
 
 	IPCServer.RegisterHandler(
 		PACKAGE_SIMULATE_BUTTON,

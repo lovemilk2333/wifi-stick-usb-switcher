@@ -77,14 +77,18 @@ flowchart TD
 ## 构建
 
 ```bash
-./build.sh [--debug] [arm64|amd64]
+./build.sh [--debug] [arm64|amd64]   # 等价 make cli-amd64 / make cli-arm64
+make cli-amd64                       # 本机编译
+make cli-arm64                       # 交叉编译
+make DEBUG=1 cli-amd64               # 带调试信息(-gcflags=all=-N -l)
 ```
 
-| 参数        | 说明                                                                                 |
-| :---------- | :----------------------------------------------------------------------------------- |
-| 默认(amd64) | 本机编译,输出 `build/amd64/cli`                                                      |
-| `arm64`     | 交叉编译到设备架构,输出 `build/arm64/cli`,需要安装 `aarch64-linux-gnu-gcc`(静态链接) |
-| `--debug`   | 带调试信息(`-gcflags=all=-N -l`),可用于 gdbserver 调试                               |
+libusbgx(submodule)由 Makefile 检测源文件变更后用 meson 自动构建,产物在 `build/libusbgx/<arch>/`;构建机需要 `meson`/`ninja`,arm64 交叉需要 `aarch64-linux-gnu-gcc/g++`。
+
+| 产物                    | 说明                                                                  |
+| :---------------------- | :-------------------------------------------------------------------- |
+| `build/amd64/cli`       | 本机编译(动态链接 libusbgx.so.2)                                      |
+| `build/arm64/cli`       | 交叉编译到设备架构(动态链接 libusbgx.so.2,设备预装或随 release 提供) |
 
 ## 部署
 
@@ -97,6 +101,8 @@ sudo apt install dnsmasq udhcpc iproute2
 - `dnsmasq`:RNDIS 网关模式的 DHCP 服务器(USB host 从 stick 拿地址)
 - `udhcpc`:RNDIS 从模式的 DHCP 探测(`enableClientMode` 用它向 Windows ICS/上游要租约)
 - `iproute2`:`ip` 命令,配地址/路由的基础工具
+
+> `cli` 动态链接 `libusbgx.so.2`(configfs 操作库)。HandsomeMod 镜像预装(随 `gc` 附带);若缺失:`sudo apt install libusbgx`,或把 release 压缩包内的 `libusbgx.so.2.0.0` 安装到 `/usr/lib/` 并 `ldconfig`。
 
 ### 2. 安装二进制
 
@@ -219,8 +225,7 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--led-blink-duration`     | `100ms`                            | 模式切换快闪的亮时长                                |
 | `--led-blink-interval`     | `300ms`                            | 模式切换快闪的灭时长                                |
 | `--submode-led-duration`   | `750ms`                            | 进入/退出子模式选择时 LED 的关闭提示时长            |
-| `-c, --config-fs`          | `/sys/kernel/config/usb_gadget/g1` | configfs 路径(不存在时由 `gc -a` 创建)              |
-| `-g, --gc-path`            | `gc`                               | HandsomeMod `gc` 工具路径或 `$PATH` 中的可执行名    |
+| `-c, --config-fs`          | `/sys/kernel/config/usb_gadget/g1` | configfs 路径(不存在时由 libusbgx 创建)             |
 | `--rndis-device-mac`       | `02:12:34:56:78:9a`                | 设备侧 RNDIS 接口 MAC                               |
 | `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                    |
 | `-a, --rndis-ip`           | `10.22.33.1/24`                    | RNDIS 接口 IP(带前缀),DHCP 池由此自动推导           |
@@ -299,9 +304,8 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 
 ## 技术细节
 
-- **手工创建 configfs 而不是用 `gc -a`**:这台设备上的 `gc -a` 创建函数后立即绑定 UDC,config 里的 link 一建立,函数属性(`dev_addr`/`host_addr` 等)就被锁定,写入永远返回 EBUSY,接口 MAC 只能是 gc 的随机值。本程序按 `mkdir 函数目录 → 写 MAC → link` 的顺序手工创建,UDC 绑定(echo)放在最后,绑定前 configfs 完全可写。实测写入的 MAC 生效。
-- **ifname 属性必须写模式**:内核(≥5.12,`gether_set_ifname`)要求 ifname 写成接口模式(`usb%d`),写具体名字(`usb0`)会返回 `-EINVAL`。绑定后内核按空闲号分配真实接口名,程序读回属性解析。
-- **`gc -l` 是只读的**:它是 configfs 的只读快照,不会解绑;而 `gc -a/-c/-e/-d/-r` 每次调用末尾都会解绑 gadget。解析以 tab 分隔键值(键里没有 tab,值里可以有空格,`Serial Number` 键本身也含空格)。
+- **configfs 操作走 libusbgx(cgo)**:函数/配置/属性/OS 描述符的创建与写入全部经 submodule `core/usb/gadget/libusbgx`(LGPL),不再 exec 外部 `gc` 二进制。libusbgx 的属性写在绑定前完成,不存在"link 后属性被锁定(EBUSY)"的时序问题。
+- **ifname 属性必须写模式**:内核(≥5.12,`gether_set_ifname`)要求 ifname 写成接口模式(`usb%d`),写具体名字(`usb0`)会返回 `-EINVAL`。libusbgx 把 ifname 视为只读,程序在绑定前直写 configfs;绑定后内核按空闲号分配真实接口名,程序读回属性解析。
 - **configfs 不能创建文件**:写一个不存在的属性路径返回 EACCES,写入必须是 `exist_only` 语义(先 stat 再写)。
 - **NetworkManager 让位**:向 `/etc/NetworkManager/conf.d/<PROJECT_IDENT>.conf` 写持久 unmanaged 配置(NM 启动加载早于 usb0 出现,注册即 unmanaged),写入后 SIGHUP 重载并校验,失效时用 `nmcli device set ... managed no` 兜底;NM 接管时会把 usb0 当 DHCP client,永远拿不到地址还会清掉配置的 IP。
 - **从模式 DNS 直写 `/etc/resolv.conf`**:resolvconf tail 方案在该设备无效(resolv.conf 不重新聚合),改为写前备份原状(symlink 也处理)、离开从模式时还原。已知限制:NetworkManager 重写 resolv.conf 会覆盖条目。
@@ -329,13 +333,16 @@ tests/virtual-button/   # 虚拟按键注入工具
 
 | 工具                    | 系统预装 | 简介                                                       | URL                               |
 | :---------------------- | :------: | :--------------------------------------------------------- | :-------------------------------- |
-| `/usr/bin/gc`           |    是    | HandsomeMod 的 Gadget Controller,用于创建/解析 gadget 配置 | https://github.com/HandsomeMod/gc |
+| `libusbgx.so.2`         |    是    | configfs 操作库(运行时,submodule 引入;缺失可 `apt install libusbgx`) | https://github.com/libusbgx/libusbgx |
 | `dnsmasq`               |    否    | RNDIS 接口的 DHCP 服务器(`apt install dnsmasq`)            |                                   |
 | `udhcpc`                |    否    | RNDIS 从模式的 DHCP 探测(`apt install udhcpc`)             |                                   |
 | `iproute2`              |    否    | `ip` 命令,配地址/路由(`apt install iproute2`)              |                                   |
 | `adbd`                  |    是    | ADB 模式下的 device 端守护进程                             |                                   |
+| `meson` / `ninja`       |    否    | 构建 libusbgx 时需要                                       |                                   |
 | `aarch64-linux-gnu-gcc` |    否    | 交叉编译 arm64 时需要                                      |                                   |
 
 ## License
 
-BSD 3-Clause,见 [LICENSE](LICENSE)。
+主要文件使用使用 [BSD 3-Clause](LICENSE)
+
+[`core/usb/gadget/libusbgx`](core/usb/gadget/libusbgx) 以 submodule 引入上游 [libusbgx](https://github.com/libusbgx/libusbgx)(LGPL-2.1-or-later), 许可证全文见 [core/usb/gadget/libusbgx/COPYING.LGPL](core/usb/gadget/libusbgx/COPYING.LGPL)

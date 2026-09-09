@@ -1,0 +1,4 @@
+[submodule "core/usb/gadget/libusbgx"]
+	path = core/usb/gadget/libusbgx
+	url = https://github.com/libusbgx/libusbgx.git
+	branch = master

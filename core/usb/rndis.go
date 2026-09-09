@@ -41,205 +41,112 @@ type UsbGadgetRndis struct {
 	UsbGadgetFunctionBase
 }
 
-// dnsmasqPidFile 返回本实例的 dnsmasq pid 文件路径 — 随接口名动态,
+// dnsmasq_pid_file 返回本实例的 dnsmasq pid 文件路径 — 随接口名动态,
 // 接口名由 --rndis-ifname 配置(默认 usb0)。
-func (this *UsbGadgetRndis) dnsmasqPidFile() string {
+func (this *UsbGadgetRndis) dnsmasq_pid_file() string {
 	return "/tmp/dnsmasq-" + this.ifname + ".pid"
 }
 
-// add 手工创建 rndis 函数并 link 进 config —— 不用 gc -a:这台设备上的
-// gc -a 创建函数后立即绑定 UDC,config link 建立即锁定全部函数属性,
-// dev_addr/host_addr 写入永远 EBUSY,usb0 接口 MAC 只能是 gc 随机值。
-// configfs 原生 mkdir 的顺序:函数目录 → 写 MAC(link 前可写)→ link;
-// UDC 绑定由 enableGadget 的 echo 完成,绑定前的 configfs 完全可写。
-// 实测验证:mkdir → 写 dev_addr/host_addr → ln → echo UDC,usb0 接口
-// MAC 即为写入的 dev_addr。
-func (this *UsbGadgetRndis) add(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	this.setInstance("rndis.1")
-	instance := this.getInstance()
+// add 经 libusbgx 创建 rndis 函数并 link 进 config
+// (gadget.Ctx.AddRndis:create_function → MAC/qmult(usbg_f_net_*)→
+// ifname 直写(只读 attr)→ add_config_function)。顺序由 libusbgx 保证:
+// 属性写入在绑定前,configfs 未锁定,不会 EBUSY。
+func (this *UsbGadgetRndis) add(ctx *UsbGadgetFunctionContext) error {
+	this.set_instance("rndis.1")
+	instance := this.get_instance()
 
-	funcSub := "functions/" + this._type + "." + instance
-	funcDir := filepath.Join(ctx.Basepath, funcSub)
-	if err := os.MkdirAll(funcDir, 0755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", funcSub, err)
-	}
-
-	// dev_addr / host_addr 必须在 link 之前写入:link 建立后这两个
-	// 属性被 configfs 锁定(EBUSY,实测)。
-	if err := ctx.WriteSubpath(base.Subpath(funcSub+"/dev_addr"), true, []byte(this.dev_addr+"\n")); err != nil {
-		return fmt.Errorf("write dev_addr: %w", err)
-	}
-	if err := ctx.WriteSubpath(base.Subpath(funcSub+"/host_addr"), true, []byte(this.host_addr+"\n")); err != nil {
-		return fmt.Errorf("write host_addr: %w", err)
-	}
-	if this.ifname != "" {
-		// 内核 (≥5.12, gether_set_ifname) 要求 ifname 属性写成接口
-		// PATTERN —— 必须恰好含一个 `%d`("usb%d"),写具体名字("usb0")
-		// 会返回 -EINVAL(实测 log 里的 `write ifname: invalid
-		// argument`)。具体接口名由内核在绑定(enableGadget)时按空闲号
-		// 分配,enable() 里读回属性解析真实名字。
-		if err := ctx.WriteSubpath(base.Subpath(funcSub+"/ifname"), true, []byte(rndisIfnamePattern(this.ifname)+"\n")); err != nil {
-			return fmt.Errorf("write ifname: %w", err)
-		}
-	}
+	var qmult uint
 	if this.qmult != "" {
-		if err := ctx.WriteSubpath(base.Subpath(funcSub+"/qmult"), true, []byte(this.qmult+"\n")); err != nil {
-			return fmt.Errorf("write qmult: %w", err)
+		parsed, err := strconv.ParseUint(this.qmult, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid qmult `%s`: %w", this.qmult, err)
 		}
+		qmult = uint(parsed)
 	}
 
-	linkPath := filepath.Join(ctx.Basepath, "configs/c1.1", instance)
-	if err := os.Symlink(funcDir, linkPath); err != nil {
-		return fmt.Errorf("link %s -> %s: %w", linkPath, funcSub, err)
+	if err := ctx.C.AddRndis(instance, this.dev_addr, this.host_addr, this.ifname, qmult); err != nil {
+		return err
 	}
 	return nil
 }
 
-// rndisIfnamePattern 把具体接口名("usb0")转换成内核 ifname 属性要求的
-// 模式("usb%d")—— 内核按该模式在绑定后分配下一个空闲接口名。
-func rndisIfnamePattern(ifname string) string {
-	return strings.TrimRight(ifname, "0123456789") + "%d"
-}
-
-// resolveIfname 读回 ifname 属性得到绑定后内核分配的真实接口名
+// resolve_ifname 读回 ifname 属性得到绑定后内核分配的真实接口名
 // (绑定前属性回显的是 "usb%d" 模式,绑定后回显具体名字)。读不到时
-// 返回空串,由调用方继续用配置名。
-func (this *UsbGadgetRndis) resolveIfname(ctx UsbGadgetContext) string {
-	instance := this.getInstance()
+// 返回空串,由调用方继续用配置名。configfs 只读,直读文件即可。
+func (this *UsbGadgetRndis) resolve_ifname(ctx *UsbGadgetFunctionContext) string {
+	instance := this.get_instance()
 	if instance == "" {
 		return ""
 	}
-	data, err := ctx.ReadSubpath(base.Subpath("functions/rndis."+instance+"/ifname"), false)
+	data, err := os.ReadFile(filepath.Join(ctx.ConfigFs, "functions", "rndis."+instance, "ifname"))
 	if err != nil {
 		return ""
 	}
-	name := string(data)
+	name := strings.TrimSpace(string(data))
 	if strings.HasSuffix(name, "%d") { // 绑定前:仍是模式,不是真实名字
 		return ""
 	}
 	return name
 }
 
-// effect 在 add 之后、绑定(enableGadget)之前执行 —— configfs 未锁定,
-// gadget 级属性可写;MAC 已在 add 里写入,这里只写 ID/class/strings
-// 并清场。
-func (this *UsbGadgetRndis) effect(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
-	instance := this.getInstance()
+// effect 在 add 之后、绑定(Enable)之前执行 —— 绑定前 configfs 未锁定,
+// gadget 级属性/OS 描述符可写。MAC 已在 add(libusbgx)里写入,这里写
+// ID/class/strings/os_desc 并清场。值随模式固定(RNDIS:18d1:4ee4)。
+func (this *UsbGadgetRndis) effect(ctx *UsbGadgetFunctionContext) error {
+	instance := this.get_instance()
 	if instance == "" {
 		return fmt.Errorf("rndis instance not set after add")
 	}
 
-	// Override device IDs and class codes — gc defaults (from cmake config)
-	// differ from the RNDIS-mode values we need.
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_VENDOR, "0x18d1"); err != nil {
-		return fmt.Errorf("write idVendor: %w", err)
+	// Override device IDs and class codes — libusbgx 创建 gadget 的默认
+	// 值(0x0000/0x0000)与 RNDIS 模式需要值不同。
+	// bcdUSB 0x0200;idVendor/idProduct 18d1:4ee4(Google Nexus/Pixel
+	// tether+debug);bcdDevice 0x0223 对齐手机(OPPO 2.23)。
+	// 设备级 class 0/0/0:与真实 Android 手机 USB 共享一致,分类全在
+	// 接口/IAD 级 —— 之前写 EF/02/01(Misc-IAD)时 Win7 开启 ICS 后
+	// RNDIS 驱动 null pointer 蓝屏,手机不会。
+	if err := ctx.C.SetGadgetAttrs(0x0200, 0x18d1, 0x4ee4, 0x0223, 0x00, 0x00, 0x00); err != nil {
+		return err
 	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_PRODUCT, "0x4ee4"); err != nil {
-		return fmt.Errorf("write idProduct: %w", err)
-	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_BCD_USB, "0x0200"); err != nil {
-		return fmt.Errorf("write bcdUSB: %w", err)
-	}
-	// 设备级 class 0/0/0:与真实 Android 手机 USB 共享(OPPO 0x22d9:0x2766
-	// 实测)一致,分类全在接口/IAD 级 —— 之前写 EF/02/01(Misc-IAD)时
-	// Win7 开启 ICS 后 RNDIS 驱动 null pointer 蓝屏,手机不会。
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_CLASS, "0x00"); err != nil {
-		return fmt.Errorf("write bDeviceClass: %w", err)
-	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_SUBCLASS, "0x00"); err != nil {
-		return fmt.Errorf("write bDeviceSubClass: %w", err)
-	}
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_DEVICE_PROTOCOL, "0x00"); err != nil {
-		return fmt.Errorf("write bDeviceProtocol: %w", err)
-	}
-	// bcdDevice 对齐手机(OPPO 2.23),configfs 按 0x0223 写
-	if err := ctx.setAttr(USB_GADGET_SUBPATH_BCD_DEVICE, "0x0223"); err != nil {
-		return fmt.Errorf("write bcdDevice: %w", err)
+	if err := ctx.C.SetStrs(this.serial_number, this.manufacturer, this.product); err != nil {
+		return err
 	}
 
-	// Override strings (gc defaults are generic HandsomeMod strings).
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_SERIALNUMBER, this.serial_number); err != nil {
-		return fmt.Errorf("write serialnumber: %w", err)
+	// 配置级属性对齐手机枚举:MaxPower 500(写 120 会被部分 host 视为
+	// 低功耗设备)+ 配置名 "RNDIS"
+	if err := ctx.C.SetConfigName("RNDIS"); err != nil {
+		return err
 	}
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_MANUFACTURER, this.manufacturer); err != nil {
-		return fmt.Errorf("write manufacturer: %w", err)
-	}
-	if err := ctx.setLanguageStrings(USB_GADGET_SUBPATH_STRINGS_PRODUCT, this.product); err != nil {
-		return fmt.Errorf("write product: %w", err)
-	}
-
-	// 配置级属性对齐手机枚举:MaxPower 500mA(手机为 500,写 120 会被
-	// 部分 host 视为低功耗设备)+ 配置名 "RNDIS"(gc 默认只建了
-	// configs/c1.1,不写则是 2mA、无配置名)。
-	if err := ctx.WriteSubpath(base.Subpath("configs/c1.1/MaxPower"), true, []byte("500\n")); err != nil {
-		return fmt.Errorf("write configs/c1.1/MaxPower: %w", err)
-	}
-	if err := ctx.WriteSubpath(base.Subpath("configs/c1.1/strings/0x409/configuration"), true, []byte("RNDIS\n")); err != nil {
-		return fmt.Errorf("write configs/c1.1/strings/0x409/configuration: %w", err)
+	if err := ctx.C.WriteConfigMaxPower(500); err != nil {
+		return err
 	}
 
 	// ---- MS OS Descriptor 1.0 (Extended Compat ID) -----------------------
 	// Windows 的 inbox RNDIS 驱动(usb8023.sys)靠 Extended Compat ID 的
-	// compatible_id="RNDIS" 匹配接口并自动安装驱动;没有 os_desc 时 Windows
-	// 枚举不到 RNDIS 接口,设备管理器显示"其他设备"(代码 28)。此 block
-	// 复刻 vendor 参考脚本 original-rndis.sh(同款内核,实测可被 Windows
-	// 自动识别为 RNDIS 设备)。os_desc 目录由内核在 gadget 创建时自动生成,
-	// use/b_vendor_code/qw_sign 属性已存在,只需写值。
-	funcSub := "functions/" + this._type + "." + instance
-	if err := ctx.WriteSubpath(base.Subpath("os_desc/use"), true, []byte("1")); err != nil {
-		return fmt.Errorf("write os_desc/use: %w", err)
+	// compatible_id="RNDIS" 匹配接口并自动安装驱动;没有 os_desc 时
+	// Windows 枚举不到 RNDIS 接口,设备管理器显示"其他设备"(代码 28)。
+	if err := ctx.C.SetOsDesc(0xcd, "MSFT100"); err != nil {
+		return err
 	}
-	if err := ctx.WriteSubpath(base.Subpath("os_desc/b_vendor_code"), true, []byte("0xcd")); err != nil {
-		return fmt.Errorf("write os_desc/b_vendor_code: %w", err)
-	}
-	// qw_sign 内核原样存 8 字节(实测读回 "MSFT100\n"),写法与 vendor
-	// echo 的字节一致。
-	if err := ctx.WriteSubpath(base.Subpath("os_desc/qw_sign"), true, []byte("MSFT100\n")); err != nil {
-		return fmt.Errorf("write os_desc/qw_sign: %w", err)
+	if err := ctx.C.SetFunctionOsDesc(instance, "rndis", "RNDIS", "5162001"); err != nil {
+		return err
 	}
 
-	// 函数级 interface 兼容 ID:内核写入时去掉尾随换行、补 0 到 8 字节
-	// (实测读回 "RNDIS\0\0\0" / "5162001\0"),Windows 拿到的就是
-	// "RNDIS" + sub_compatible_id 5162001。
-	interfaceOsDescDir := filepath.Join(ctx.Basepath, funcSub, "os_desc", "interface.rndis")
-	if err := os.MkdirAll(interfaceOsDescDir, 0755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Join(funcSub, "os_desc", "interface.rndis"), err)
-	}
-	if err := ctx.WriteSubpath(base.Subpath(funcSub+"/os_desc/interface.rndis/compatible_id"), true, []byte("RNDIS\n")); err != nil {
-		return fmt.Errorf("write compatible_id: %w", err)
-	}
-	if err := ctx.WriteSubpath(base.Subpath(funcSub+"/os_desc/interface.rndis/sub_compatible_id"), true, []byte("5162001\n")); err != nil {
-		return fmt.Errorf("write sub_compatible_id: %w", err)
-	}
+	// 清场:只停本模式(RNDIS)自己的 dnsmasq —— 切走(ADB)后它空转,
+	// 回来时 effect 先杀再启;adbd 属于 ADB 模式,由 adb effect 自管,
+	// 不在 RNDIS 里碰它(effect 不做跨模式副作用,避免耦合)。
+	stop_dnsmasq_all()
 
-	// 绑定前把 config 链到 os_desc:composite_bind 靠这个链接把 Extended
-	// Compat ID 描述符挂到 config 上。链接必须建在 os_desc 目录内、目标用
-	// 绝对路径 —— 裸相对路径会被 configfs 按 os_desc 内路径解析(实测
-	// `ln -s configs/c1.1 os_desc` 报 ENOENT)。每次 apply 前 gc -c 已把
-	// gadget 目录删掉重建,这里防御性先删旧链接再建。
-	osDescConfigLink := filepath.Join(ctx.Basepath, "os_desc", "c1.1")
-	_ = os.Remove(osDescConfigLink)
-	if err := os.Symlink(filepath.Join(ctx.Basepath, "configs", "c1.1"), osDescConfigLink); err != nil {
-		return fmt.Errorf("link os_desc -> configs/c1.1: %w", err)
-	}
-
-	// 清场:离开 ADB 模式后 orphaned adbd 还在 poll /dev/usb-ffs/adb,
-	// 停掉本 daemon 启动的它(句柄/pid 文件校验,不是无差别 killall);
-	// 上一轮 RNDIS 的 dnsmasq(接口已随 gadget 消失)也一并停掉。
-	killAdbd()
-	stopDnsmasqAll()
-
-	// NOTE: 不要在这里绑定 UDC。绑定只有一次,在 enableGadget 的
-	// `echo <udc> > UDC` —— 绑定前的 configfs 是可写的。
+	// NOTE: 不要在这里绑定 UDC。绑定只有一次,在 Apply 的 Enable。
 	return nil
 }
 
-// enable 在 gadget 绑定(enableGadget)之后调用 — 此时内核才创建 usb0
+// enable 在 gadget 绑定(enable_gadget)之后调用 — 此时内核才创建 usb0
 // 接口。RNDIS 自己管理网络:让 NM 让开、接口 up,然后按 submode 分派:
 // 0(网关模式)配 --rndis-ip 并起 dnsmasq;1(从模式)从上游 DHCP 拿
 // 网段配客户端 IP 与默认路由。接口每次随 gadget 重建都是干净的,切换
 // submode 无需清地址/路由。
-func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string) (string, error)) error {
+func (this *UsbGadgetRndis) enable(ctx *UsbGadgetFunctionContext) error {
 	ifname := this.ifname
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -249,7 +156,7 @@ func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string)
 		}
 		// ifname 属性写成的是 "usb%d" 模式,绑定后内核才分配具体名字
 		// (usb0,若 usb0 被占用则为 usb1);从属性读回真实名字。
-		if resolved := this.resolveIfname(ctx); resolved != "" && resolved != ifname {
+		if resolved := this.resolve_ifname(ctx); resolved != "" && resolved != ifname {
 			ifname = resolved
 		}
 		if time.Now().After(deadline) {
@@ -259,8 +166,8 @@ func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string)
 	}
 	this.ifname = ifname // 让 dnsmasq pid 文件等后续逻辑用真实名字
 
-	this.unmanageFromNetworkManager(ifname)
-	// unmanageFromNetworkManager 内部已等 NM 标记 unmanaged(并兜底),
+	this.unmanage_from_network_manager(ifname)
+	// unmanage_from_network_manager 内部已等 NM 标记 unmanaged(并兜底),
 	// 接口归属确定,直接配 IP
 
 	if out, err := exec.Command("ip", "link", "set", ifname, "up").CombinedOutput(); err != nil {
@@ -269,19 +176,19 @@ func (this *UsbGadgetRndis) enable(ctx UsbGadgetContext, gc func(args ...string)
 
 	switch submode := this.GetSubmode(); submode {
 	case 0:
-		return this.enableGatewayMode(ifname)
+		return this.enable_gateway_mode(ifname)
 	case 1:
-		return this.enableClientMode(ifname)
+		return this.enable_client_mode(ifname)
 	default:
 		return fmt.Errorf("%s have no such submode: %d", this.instance, submode)
 	}
 }
 
-// enableGatewayMode 主模式:usb0 配 --rndis-ip 作为网关,起 dnsmasq
+// enable_gateway_mode 主模式:usb0 配 --rndis-ip 作为网关,起 dnsmasq
 // 供 USB host 获取地址。
-func (this *UsbGadgetRndis) enableGatewayMode(ifname string) error {
+func (this *UsbGadgetRndis) enable_gateway_mode(ifname string) error {
 	// 离开从模式:还原 DNS 配置(没进过从模式则 tail 无备份,不动)
-	restoreDns()
+	restore_dns()
 
 	// submode 直切(不重建 gadget)时接口还带着从模式的地址/路由,先清掉;
 	// 完整重建后接口是干净的,flush 无操作
@@ -291,33 +198,33 @@ func (this *UsbGadgetRndis) enableGatewayMode(ifname string) error {
 	if out, err := exec.Command("ip", "addr", "flush", "dev", ifname).CombinedOutput(); err != nil {
 		log.Printf("WARN: `ip addr flush dev %s`: %v, output: %s\n", ifname, err, string(out))
 	}
-	if err := addIfaceAddr(ifname, this.ip_addr.String()); err != nil {
+	if err := add_iface_addr(ifname, this.ip_addr.String()); err != nil {
 		log.Printf("WARN: %v\n", err)
 	}
-	this.startDnsmasq()
+	this.start_dnsmasq()
 	return nil
 }
 
-// enableClientMode 从模式:优先 udhcpc 从上游拿 DHCP(Windows ICS /
+// enable_client_mode 从模式:优先 udhcpc 从上游拿 DHCP(Windows ICS /
 // 路由器);拿不到可用租约时静态接入 Windows ICS 网段并 ping 网关
 // 验证(host 开了共享但 DHCP 分配器不可用时链路仍可达);仍不通才
 // 回退主模式,保证 stick 始终可达。
-func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
+func (this *UsbGadgetRndis) enable_client_mode(ifname string) error {
 	// submode 直切(不重建 gadget)时主模式的 dnsmasq 还在接口上跑,
 	// 从模式是 DHCP 客户端,先停掉本机 DHCP 服务器(幂等,完整重建
 	// 路径已在 effect 里停过)
-	stopDnsmasqAll()
+	stop_dnsmasq_all()
 
 	// 探测前先配临时地址:实测 usb0 无 IPv4 地址时收不到上游 DHCP 应答
 	// (手动 udhcpc 成功时 usb0 都带着地址)。失败回退主模式时这个地址
 	// 正好就是 --rndis-ip,不用额外处理。
-	if err := addIfaceAddr(ifname, this.ip_addr.String()); err != nil {
+	if err := add_iface_addr(ifname, this.ip_addr.String()); err != nil {
 		log.Printf("WARN: %v\n", err)
 	}
 
-	subnet, router, dns, err := this.probeUpstreamDhcpWithRetry(ifname)
+	subnet, router, dns, err := this.probe_upstream_dhcp_with_retry(ifname)
 	if err == nil {
-		if err := this.applyDhcpLease(ifname, subnet, router, dns); err == nil {
+		if err := this.apply_dhcp_lease(ifname, subnet, router, dns); err == nil {
 			return nil
 		} else {
 			log.Printf("WARN: dhcp lease unusable, try ICS gateway probe: %v\n", err)
@@ -326,15 +233,15 @@ func (this *UsbGadgetRndis) enableClientMode(ifname string) error {
 		log.Printf("WARN: dhcp probe failed, try ICS gateway probe: %v\n", err)
 	}
 
-	return this.enableIcsStaticMode(ifname)
+	return this.enable_ics_static_mode(ifname)
 }
 
-// applyDhcpLease 应用 DHCP 探测到的租约:usb0 配计算出的客户端 IP
+// apply_dhcp_lease 应用 DHCP 探测到的租约:usb0 配计算出的客户端 IP
 // (--rndis-client-ip 规则),默认路由 via 上游网关,DNS 用上游发的。
 // 掩码非连续/prefix >= /30(分不出可用地址)时返回错误,由调用方
 // 转 ICS 静态探测。
-func (this *UsbGadgetRndis) applyDhcpLease(ifname string, subnet, router netip.Addr, dns []netip.Addr) error {
-	prefix, ok := maskToPrefix(subnet)
+func (this *UsbGadgetRndis) apply_dhcp_lease(ifname string, subnet, router netip.Addr, dns []netip.Addr) error {
+	prefix, ok := mask_to_prefix(subnet)
 	if !ok {
 		return fmt.Errorf("non-contiguous subnet mask %s", subnet)
 	}
@@ -348,9 +255,9 @@ func (this *UsbGadgetRndis) applyDhcpLease(ifname string, subnet, router netip.A
 	}
 
 	network := netip.PrefixFrom(router, prefix).Masked().Addr()
-	ip := calcClientIP(network, prefix, this.client_ip)
+	ip := calc_client_ip(network, prefix, this.client_ip)
 	ipSpec := fmt.Sprintf("%s/%d", ip, prefix)
-	if err := addIfaceAddr(ifname, ipSpec); err != nil {
+	if err := add_iface_addr(ifname, ipSpec); err != nil {
 		return err
 	}
 	if out, err := exec.Command("ip", "route", "add", "default", "via", router.String(), "dev", ifname).CombinedOutput(); err != nil {
@@ -358,18 +265,18 @@ func (this *UsbGadgetRndis) applyDhcpLease(ifname string, subnet, router netip.A
 	}
 	// 从模式走 usb0 上网,DNS 用上游发的(没有则用上游网关兜底),
 	// 经 resolvconf tail 生效,离开从模式时还原
-	this.applyDns(dns, router)
+	this.apply_dns(dns, router)
 	log.Printf("INFO: rndis client mode: %s, gateway %s\n", ipSpec, router)
 	return nil
 }
 
-// enableIcsStaticMode 无可用 DHCP 时静态接入 Windows ICS 网段:
+// enable_ics_static_mode 无可用 DHCP 时静态接入 Windows ICS 网段:
 // --rndis-client-ip 的主机字节配 192.168.137.xx/24(ICS 共享端固定
 // 192.168.137.1/24),DNS 探测网关确认 ICS 真在(host 开了共享但 DHCP
 // 分配器不可用时链路仍可达);探测失败说明 host 既无 DHCP 也没开
 // ICS,回退主模式保可达。不用 ping 探测:Win7 防火墙默认丢入站 ICMP
 // (实测主机能 ping 通 stick、stick ping 不通 .1,但 TCP/UDP 正常)。
-func (this *UsbGadgetRndis) enableIcsStaticMode(ifname string) error {
+func (this *UsbGadgetRndis) enable_ics_static_mode(ifname string) error {
 	gateway := netip.AddrFrom4([4]byte{192, 168, 137, 1})
 
 	host := this.client_ip.As4()[3] // 传入 IP 的主机字节(0.0.0.33 → 33)
@@ -380,32 +287,32 @@ func (this *UsbGadgetRndis) enableIcsStaticMode(ifname string) error {
 	if out, err := exec.Command("ip", "addr", "flush", "dev", ifname).CombinedOutput(); err != nil {
 		log.Printf("WARN: `ip addr flush dev %s`: %v, output: %s\n", ifname, err, string(out))
 	}
-	if err := addIfaceAddr(ifname, ipSpec); err != nil {
+	if err := add_iface_addr(ifname, ipSpec); err != nil {
 		log.Printf("WARN: %v, fallback to gateway mode\n", err)
-		return this.fallbackToGatewayMode()
+		return this.fallback_to_gateway_mode()
 	}
 
-	if !this.probeIcsDns(gateway, 2*time.Second) {
+	if !this.probe_ics_dns(gateway, 2*time.Second) {
 		log.Printf("WARN: ics gateway %s has no DNS proxy, fallback to gateway mode\n", gateway)
-		return this.fallbackToGatewayMode()
+		return this.fallback_to_gateway_mode()
 	}
 
 	if out, err := exec.Command("ip", "route", "add", "default", "via", gateway.String(), "dev", ifname).CombinedOutput(); err != nil {
 		log.Printf("WARN: `ip route add default via %s dev %s`: %v, output: %s\n", gateway, ifname, err, string(out))
 	}
 	// 无 DHCP 就没有上游 DNS,ICS 主机自带 DNS 代理,指向网关
-	this.applyDns(nil, gateway)
+	this.apply_dns(nil, gateway)
 	log.Printf("INFO: rndis client mode (ics static): %s, gateway %s\n", ipSpec, gateway)
 	return nil
 }
 
-// probeIcsDns 向 gateway:53 发一个 DNS query,收到任何回复(UDP 包,
+// probe_ics_dns 向 gateway:53 发一个 DNS query,收到任何回复(UDP 包,
 // 哪怕是 REFUSED)即认为 ICS DNS 代理活着。ICS 启用时 DNS 代理固定
 // 监听共享网卡 UDP 53,且 ICS 自动在防火墙放行本网段到 53 的流量
 // (它自己依赖)——比 ping 网关可靠,也比探测 DHCP 67 有意义:
 // DNS 代理不通就没有 DNS,配了静态也上不了网。无服务时 UDP 会收到
 // ICMP port unreachable(Read 报错)或超时,两种情况都返回 false。
-func (this *UsbGadgetRndis) probeIcsDns(gateway netip.Addr, timeout time.Duration) bool {
+func (this *UsbGadgetRndis) probe_ics_dns(gateway netip.Addr, timeout time.Duration) bool {
 	conn, err := net.DialTimeout("udp4", net.JoinHostPort(gateway.String(), "53"), timeout)
 	if err != nil {
 		return false
@@ -415,7 +322,7 @@ func (this *UsbGadgetRndis) probeIcsDns(gateway netip.Addr, timeout time.Duratio
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return false
 	}
-	if _, err := conn.Write(dnsQuery("dns.msftncsi.com")); err != nil {
+	if _, err := conn.Write(dns_query("dns.msftncsi.com")); err != nil {
 		return false
 	}
 	reply := make([]byte, 512)
@@ -423,9 +330,9 @@ func (this *UsbGadgetRndis) probeIcsDns(gateway netip.Addr, timeout time.Duratio
 	return err == nil && n > 0
 }
 
-// dnsQuery 手工构造最小 DNS query(id 固定,IANA 保留校验和可乱写;
+// dns_query 手工构造最小 DNS query(id 固定,IANA 保留校验和可乱写;
 // 探测只关心有没有回复,不需要解析内容)。
-func dnsQuery(name string) []byte {
+func dns_query(name string) []byte {
 	buf := []byte{0x12, 0x34, // id(任意)
 		0x01, 0x00, // flags: RD
 		0x00, 0x01, // QDCOUNT = 1
@@ -439,11 +346,11 @@ func dnsQuery(name string) []byte {
 	return buf
 }
 
-// fallbackToGatewayMode 从模式回退:submode 直接跳回 0(回退后 LED 显示
+// fallback_to_gateway_mode 从模式回退:submode 直接跳回 0(回退后 LED 显示
 // 与后续 effect 都回到主模式),再走主模式逻辑。
-func (this *UsbGadgetRndis) fallbackToGatewayMode() error {
+func (this *UsbGadgetRndis) fallback_to_gateway_mode() error {
 	this.SetSubmode(0)
-	return this.enableGatewayMode(this.ifname)
+	return this.enable_gateway_mode(this.ifname)
 }
 
 // DNS 直接写 /etc/resolv.conf:resolvconf tail 方案在 stick 上无效
@@ -455,13 +362,13 @@ const (
 	resolvConfBackup = "/tmp/rndis-resolv.conf"
 )
 
-// applyDns 把上游 DNS(探测拿到的,没有则用上游网关兜底)写入
+// apply_dns 把上游 DNS(探测拿到的,没有则用上游网关兜底)写入
 // /etc/resolv.conf。
-func (this *UsbGadgetRndis) applyDns(dns []netip.Addr, fallback netip.Addr) {
+func (this *UsbGadgetRndis) apply_dns(dns []netip.Addr, fallback netip.Addr) {
 	if len(dns) == 0 {
 		dns = []netip.Addr{fallback}
 	}
-	backupResolvConf()
+	backup_resolv_conf()
 
 	var sb strings.Builder
 	sb.WriteString("# generated by " + base.PROJECT_IDENT + " RNDIS client submode\n")
@@ -474,9 +381,9 @@ func (this *UsbGadgetRndis) applyDns(dns []netip.Addr, fallback netip.Addr) {
 	}
 }
 
-// backupResolvConf 把 resolv.conf 原状(是否 symlink 及内容)存到 /tmp,
-// 首次进入从模式时备份,restoreDns 还原。
-func backupResolvConf() {
+// backup_resolv_conf 把 resolv.conf 原状(是否 symlink 及内容)存到 /tmp,
+// 首次进入从模式时备份,restore_dns 还原。
+func backup_resolv_conf() {
 	if _, err := os.Stat(resolvConfBackup); err == nil {
 		return // 上次的备份还没恢复,仍在从模式,不重复备份
 	}
@@ -491,8 +398,8 @@ func backupResolvConf() {
 	_ = os.WriteFile(resolvConfBackup, data, 0644)
 }
 
-// restoreDns 离开从模式(回退/切回主模式)时还原 resolv.conf 原状。
-func restoreDns() {
+// restore_dns 离开从模式(回退/切回主模式)时还原 resolv.conf 原状。
+func restore_dns() {
 	data, err := os.ReadFile(resolvConfBackup)
 	if err != nil {
 		return // 无备份(没进过从模式),不动
@@ -511,12 +418,12 @@ func restoreDns() {
 	_ = os.Remove(resolvConfBackup)
 }
 
-// addIfaceAddr 给接口配地址,3 次重试后放弃;地址已存在(重复 apply)
+// add_iface_addr 给接口配地址,3 次重试后放弃;地址已存在(重复 apply)
 // 不算错误。
-func addIfaceAddr(ifname, ipSpec string) error {
+func add_iface_addr(ifname, ipSpec string) error {
 	for attempt := 1; ; attempt++ {
 		out, err := exec.Command("ip", "addr", "add", ipSpec, "dev", ifname).CombinedOutput()
-		if err == nil || hasIfaceAddr(ifname, ipSpec) {
+		if err == nil || has_iface_addr(ifname, ipSpec) {
 			return nil
 		}
 		if attempt >= 3 {
@@ -526,21 +433,21 @@ func addIfaceAddr(ifname, ipSpec string) error {
 	}
 }
 
-// probeUpstreamDhcpWithRetry 在 client_timeout 总预算内等 RNDIS 网卡
+// probe_upstream_dhcp_with_retry 在 client_timeout 总预算内等 RNDIS 网卡
 // 出现并探测。切换 submode 时 gadget 重建,usb0 随 RNDIS 重新枚举,
 // 网卡未出现时第一轮探测必然失败(实测),所以先等 carrier up(carrier
 // up 只代表数据通道建立,Windows 侧 ICS 可能仍在就绪);剩余预算内
-// 失败重试,耗尽回退,由 enableClientMode 处理。
-func (this *UsbGadgetRndis) probeUpstreamDhcpWithRetry(ifname string) (netip.Addr, netip.Addr, []netip.Addr, error) {
+// 失败重试,耗尽回退,由 enable_client_mode 处理。
+func (this *UsbGadgetRndis) probe_upstream_dhcp_with_retry(ifname string) (netip.Addr, netip.Addr, []netip.Addr, error) {
 	deadline := time.Now().Add(this.client_timeout)
-	waitRndisCarrier(ifname, time.Until(deadline))
+	wait_rndis_carrier(ifname, time.Until(deadline))
 
 	var lastErr error
 	for attempt := 1; ; attempt++ {
 		if attempt > 1 {
 			log.Printf("INFO: rndis dhcp retry %d\n", attempt)
 		}
-		subnet, router, dns, err := this.probeUpstreamDhcp(ifname, time.Until(deadline))
+		subnet, router, dns, err := this.probe_upstream_dhcp(ifname, time.Until(deadline))
 		if err == nil {
 			return subnet, router, dns, nil
 		}
@@ -554,9 +461,9 @@ func (this *UsbGadgetRndis) probeUpstreamDhcpWithRetry(ifname string) (netip.Add
 	return netip.Addr{}, netip.Addr{}, nil, lastErr
 }
 
-// waitRndisCarrier 等接口出现且 carrier up(RNDIS 数据通道建立)。
+// wait_rndis_carrier 等接口出现且 carrier up(RNDIS 数据通道建立)。
 // carrier 文件不存在(接口未出现/刚重建)时按未就绪继续等。
-func waitRndisCarrier(ifname string, timeout time.Duration) {
+func wait_rndis_carrier(ifname string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile("/sys/class/net/" + ifname + "/carrier")
@@ -567,12 +474,12 @@ func waitRndisCarrier(ifname string, timeout time.Duration) {
 	}
 }
 
-// probeUpstreamDhcp 用系统 udhcpc 做一次完整 DHCP 交换:udhcpc -q 拿到
+// probe_upstream_dhcp 用系统 udhcpc 做一次完整 DHCP 交换:udhcpc -q 拿到
 // 租约即退出,-R 退出前发 DHCPRELEASE 终止租约 —— 只取网段,不持有
 // 地址。掩码/网关由回调脚本打到 stdout,daemon 捕获解析。insomniacslk
 // 库的 nclient4 收不到 Windows ICS 的 Offer(实测),udhcpc 手动成功过。
-func (this *UsbGadgetRndis) probeUpstreamDhcp(ifname string, timeout time.Duration) (netip.Addr, netip.Addr, []netip.Addr, error) {
-	script, err := this.udhcpcScript()
+func (this *UsbGadgetRndis) probe_upstream_dhcp(ifname string, timeout time.Duration) (netip.Addr, netip.Addr, []netip.Addr, error) {
+	script, err := this.udhcpc_script()
 	if err != nil {
 		return netip.Addr{}, netip.Addr{}, nil, fmt.Errorf("write udhcpc script: %w", err)
 	}
@@ -622,9 +529,9 @@ func (this *UsbGadgetRndis) probeUpstreamDhcp(ifname string, timeout time.Durati
 	return netip.AddrFrom4([4]byte(subnet.To4())), netip.AddrFrom4([4]byte(router.To4())), dns, nil
 }
 
-// udhcpcScript 落盘 udhcpc 回调脚本:bound/renew 时把上游掩码/网关打到
+// udhcpc_script 落盘 udhcpc 回调脚本:bound/renew 时把上游掩码/网关打到
 // stdout(daemon 从 CombinedOutput 捕获解析)。
-func (this *UsbGadgetRndis) udhcpcScript() (string, error) {
+func (this *UsbGadgetRndis) udhcpc_script() (string, error) {
 	path := "/tmp/rndis-udhcpc-" + this.ifname + ".sh"
 	script := `#!/bin/sh
 # udhcpc 回调:bound/renew 时输出网段信息,daemon 捕获解析
@@ -642,9 +549,9 @@ esac
 	return path, nil
 }
 
-// maskToPrefix 把点分掩码(255.255.255.0)转成前缀长度;非连续掩码
+// mask_to_prefix 把点分掩码(255.255.255.0)转成前缀长度;非连续掩码
 // 返回 false。
-func maskToPrefix(mask netip.Addr) (int, bool) {
+func mask_to_prefix(mask netip.Addr) (int, bool) {
 	a := mask.As4()
 	m := binary.BigEndian.Uint32(a[:])
 	prefix := bits.OnesCount32(m)
@@ -654,13 +561,13 @@ func maskToPrefix(mask netip.Addr) (int, bool) {
 	return prefix, true
 }
 
-// calcClientIP 计算从模式 usb0 的 IP:掩码对齐 8bit 时,取上游网络
+// calc_client_ip 计算从模式 usb0 的 IP:掩码对齐 8bit 时,取上游网络
 // 前缀字节 + client_ip 的后缀字节(0 字节表示取上游字节),例如
 // /24 + 0.0.22.33 → 192.168.137.33;/16 + 0.0.22.33 → 192.168.22.33;
 // 不对齐 8bit(如 /29)时取广播地址 - 2。prefix >= 30 由调用方回退。
-func calcClientIP(network netip.Addr, prefix int, client_ip netip.Addr) netip.Addr {
+func calc_client_ip(network netip.Addr, prefix int, client_ip netip.Addr) netip.Addr {
 	if prefix%8 != 0 {
-		broadcast, _ := subnetLast(netip.PrefixFrom(network, prefix))
+		broadcast, _ := subnet_last(netip.PrefixFrom(network, prefix))
 		return broadcast.Prev().Prev()
 	}
 
@@ -672,8 +579,8 @@ func calcClientIP(network netip.Addr, prefix int, client_ip netip.Addr) netip.Ad
 	return netip.AddrFrom4(n)
 }
 
-// hasIfaceAddr 检查接口上是否已有指定地址(如 `10.22.33.1/24`)。
-func hasIfaceAddr(ifname, ipSpec string) bool {
+// has_iface_addr 检查接口上是否已有指定地址(如 `10.22.33.1/24`)。
+func has_iface_addr(ifname, ipSpec string) bool {
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
 		return false
@@ -690,7 +597,7 @@ func hasIfaceAddr(ifname, ipSpec string) bool {
 	return false
 }
 
-// unmanageFromNetworkManager 让 NetworkManager 不接管 ifname。NM 接管
+// unmanage_from_network_manager 让 NetworkManager 不接管 ifname。NM 接管
 // 后会把 usb0 当 DHCP client(method=auto),永远拿不到地址,超时后清掉
 // 我们配的 IP,再每 45s 无限重试 — 必须让开。
 //
@@ -701,7 +608,7 @@ func hasIfaceAddr(ifname, ipSpec string) bool {
 // 重载,并校验是否生效,不行用 nmcli 直接改运行时状态兜底(实测
 // NM 1.30 的 SIGHUP 重载不会重新评估"已有"设备的 unmanaged 状态)。
 // NM 未安装/未运行时,以上步骤均为无害 no-op。
-func (this *UsbGadgetRndis) unmanageFromNetworkManager(ifname string) {
+func (this *UsbGadgetRndis) unmanage_from_network_manager(ifname string) {
 	// 不主动创建 /etc/NetworkManager(没装 NM 就别留垃圾)
 	if _, err := os.Stat("/etc/NetworkManager"); err != nil {
 		return
@@ -711,24 +618,24 @@ func (this *UsbGadgetRndis) unmanageFromNetworkManager(ifname string) {
 		log.Printf("WARN: mkdir %s: %v\n", filepath.Dir(confPath), err)
 		return
 	}
-	if err := os.WriteFile(confPath, []byte(unmanagedConf(ifname)), 0644); err != nil {
+	if err := os.WriteFile(confPath, []byte(unmanaged_conf(ifname)), 0644); err != nil {
 		log.Printf("WARN: write %s: %v\n", confPath, err)
 		return
 	}
 
-	reloadNetworkManager()
+	reload_network_manager()
 
 	// 3) 校验生效;SIGHUP 重载对已有设备可能无效(实测),超时后用
 	//    nmcli 直接设运行时状态兜底。NM 未运行时立即放弃等。
 	for range 6 {
-		unmanaged, responsive := nmDeviceIsUnmanaged(ifname)
+		unmanaged, responsive := nm_device_is_unmanaged(ifname)
 		if !responsive {
 			return // NM 未运行,conf 已写入,等它下次启动时生效即可
 		}
 		if unmanaged {
 			return
 		}
-		reloadNetworkManager()
+		reload_network_manager()
 		time.Sleep(500 * time.Millisecond)
 	}
 	if out, err := exec.Command("nmcli", "device", "set", ifname, "managed", "no").CombinedOutput(); err != nil {
@@ -738,23 +645,23 @@ func (this *UsbGadgetRndis) unmanageFromNetworkManager(ifname string) {
 	}
 }
 
-// unmanagedConf 生成 NetworkManager conf.d 的 unmanaged 规则。
-func unmanagedConf(ifname string) string {
+// unmanaged_conf 生成 NetworkManager conf.d 的 unmanaged 规则。
+func unmanaged_conf(ifname string) string {
 	return "[device]\nmatch-device=interface-name:" + ifname + "\nmanaged=0\n"
 }
 
-// reloadNetworkManager 向 NetworkManager 发 SIGHUP 重载配置(标准做法,
+// reload_network_manager 向 NetworkManager 发 SIGHUP 重载配置(标准做法,
 // 不依赖 nmcli)。NM 未运行时是无害 no-op。
-func reloadNetworkManager() {
+func reload_network_manager() {
 	if out, err := exec.Command("sh", "-c", "kill -HUP $(pgrep -x NetworkManager) 2>/dev/null").CombinedOutput(); err != nil {
 		log.Printf("WARN: reload NetworkManager: %v, output: %s\n", err, string(out))
 	}
 }
 
-// nmDeviceIsUnmanaged 用 nmcli 查询 ifname 是否已被 NM 标为 unmanaged
+// nm_device_is_unmanaged 用 nmcli 查询 ifname 是否已被 NM 标为 unmanaged
 // (固定枚举值,不受 locale 影响)。返回 (是否 unmanaged, NM 是否可答);
 // NM 未安装/未运行或设备未知时 responsive 为 false。
-func nmDeviceIsUnmanaged(ifname string) (bool, bool) {
+func nm_device_is_unmanaged(ifname string) (bool, bool) {
 	out, err := exec.Command("nmcli", "-t", "-f", "GENERAL.STATE", "device", "show", ifname).CombinedOutput()
 	if err != nil {
 		return false, false
@@ -762,19 +669,19 @@ func nmDeviceIsUnmanaged(ifname string) (bool, bool) {
 	return strings.Contains(string(out), "unmanaged"), true
 }
 
-// startDnsmasq 在接口上启动 dnsmasq DHCP 服务器,供 USB host 获取地址。
+// start_dnsmasq 在接口上启动 dnsmasq DHCP 服务器,供 USB host 获取地址。
 // 池从本机 IP 之后到子网最后一个地址;--port=0 关闭 DNS,避免与系统
 // dnsmasq 冲突(系统实例已禁用,本实例独占 67 端口)。
-func (this *UsbGadgetRndis) startDnsmasq() {
-	pidFile := this.dnsmasqPidFile()
-	if pidNum := readDnsmasqPid(pidFile); pidNum > 0 {
+func (this *UsbGadgetRndis) start_dnsmasq() {
+	pidFile := this.dnsmasq_pid_file()
+	if pidNum := read_dnsmasq_pid(pidFile); pidNum > 0 {
 		return // 已在运行,pid 文件校验过 cmdline,不会误判
 	}
 
 	// 网关就是本机 usb0 的地址 —— 用 Masked() 会取到网络地址
 	// (10.22.33.0),给 host 一个无人应答的假网关
 	router := this.ip_addr.Addr()
-	last, ok := subnetLast(this.ip_addr)
+	last, ok := subnet_last(this.ip_addr)
 	if !ok {
 		log.Printf("WARN: cannot derive dhcp pool from `%s`, skip dnsmasq\n", this.ip_addr)
 		return
@@ -790,7 +697,7 @@ func (this *UsbGadgetRndis) startDnsmasq() {
 	// dnsmasq 对标量选项(如 --port)取最后一次出现,所以用户参数放在
 	// 默认值之后可以覆盖它们(--port=53 开启 DNS);--interface /
 	// --bind-interfaces / --pid-file 是控制参数,必须最后,保证接口归属
-	// 和 stopDnsmasqAll 的 pid 文件追踪不被破坏。
+	// 和 stop_dnsmasq_all 的 pid 文件追踪不被破坏。
 	// 注意 --no-resolv / --no-hosts 无法被参数覆盖(--hosts 没有正向
 	// 开关);想提供 hosts 请用 --addn-hosts=...(--no-hosts 只跳过
 	// /etc/hosts,addn-hosts 文件仍然加载)。
@@ -816,17 +723,17 @@ func (this *UsbGadgetRndis) startDnsmasq() {
 	}
 }
 
-// stopDnsmasqAll 停掉由本 daemon 启动的所有 dnsmasq 实例(pid 文件 +
+// stop_dnsmasq_all 停掉由本 daemon 启动的所有 dnsmasq 实例(pid 文件 +
 // cmdline 校验,pid 复用也不会误杀无关进程)。本 daemon 只会为 RNDIS
 // 接口启动 dnsmasq,遍历 /tmp/dnsmasq-*.pid 覆盖 ifname 动态化后的
 // 全部路径。
-func stopDnsmasqAll() {
+func stop_dnsmasq_all() {
 	matches, err := filepath.Glob("/tmp/dnsmasq-*.pid")
 	if err != nil {
 		return
 	}
 	for _, pidFile := range matches {
-		pidNum := readDnsmasqPid(pidFile)
+		pidNum := read_dnsmasq_pid(pidFile)
 		if pidNum <= 0 {
 			continue
 		}
@@ -838,11 +745,11 @@ func stopDnsmasqAll() {
 	}
 }
 
-// readDnsmasqPid 返回 pid 文件中指向的、由我们启动的 dnsmasq 实例的
+// read_dnsmasq_pid 返回 pid 文件中指向的、由我们启动的 dnsmasq 实例的
 // pid;不存在或 pid 已被其他进程复用(pid 文件过期)时返回 0。校验方式:
 // /proc/<pid>/cmdline 必须包含该 pid 文件对应的 --pid-file 参数 — 这样
 // 绝不会误杀系统 dnsmasq 或无关进程。
-func readDnsmasqPid(pidFile string) int {
+func read_dnsmasq_pid(pidFile string) int {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return 0
@@ -860,8 +767,8 @@ func readDnsmasqPid(pidFile string) int {
 	return pidNum
 }
 
-// subnetLast 返回 prefix 子网的最后一个地址(广播地址)。
-func subnetLast(prefix netip.Prefix) (netip.Addr, bool) {
+// subnet_last 返回 prefix 子网的最后一个地址(广播地址)。
+func subnet_last(prefix netip.Prefix) (netip.Addr, bool) {
 	if !prefix.IsValid() || prefix.Bits() >= 32 || !prefix.Addr().Is4() {
 		return netip.Addr{}, false
 	}

@@ -78,28 +78,28 @@ func (this *LedMode) Done() *LedMode {
 	return this
 }
 
-func applyAction(now time.Time, action *LedModeAction, ctx LedInterpreterContext) error {
-	led := ctx.getLed()
+func apply_action(now time.Time, action *LedModeAction, ctx LedInterpreterContext) error {
+	led := ctx.get_led()
 
 	switch action.action {
 	case MODE_ACTION_ON:
-		err_trigger := led.setTrigger(LedTrigger("none"))
-		err_brightness := led.setBrightness(led.GetMaxBrightness())
+		err_trigger := led.set_trigger(LedTrigger("none"))
+		err_brightness := led.set_brightness(led.GetMaxBrightness())
 		if err_trigger != nil {
 			return err_trigger
 		} else if err_brightness != nil {
 			return err_brightness
 		}
 	case MODE_ACTION_OFF:
-		err_trigger := led.setTrigger(LedTrigger("none"))
-		err_brightness := led.setBrightness(0)
+		err_trigger := led.set_trigger(LedTrigger("none"))
+		err_brightness := led.set_brightness(0)
 		if err_trigger != nil {
 			return err_trigger
 		} else if err_brightness != nil {
 			return err_brightness
 		}
 	case MODE_ACTION_WAIT:
-		ctx.setNextActionTime(now.Add(action.duration))
+		ctx.set_next_action_time(now.Add(action.duration))
 	default:
 		return fmt.Errorf("unknown or unsupported LedModeAction: %v", action.action)
 	}
