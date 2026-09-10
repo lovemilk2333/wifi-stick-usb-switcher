@@ -99,8 +99,7 @@ type Daemon struct {
 	shutdown_timeout   time.Duration
 	shutting_down      bool
 
-	// stop_chan 由 Stop()(SIGTERM/SIGINT)关闭,Mainloop select 退出,
-	// defer 统一清理运行时副作用 —— systemctl stop 不再强杀留残留
+	// Stop()(SIGTERM/SIGINT)关闭,Mainloop select 退出并 defer 清理
 	stop_chan chan struct{}
 }
 
@@ -204,9 +203,7 @@ func (this *Daemon) apply_led_state() {
 
 // Mainloop runs the daemon event loop at the configured tick rate.
 func (this *Daemon) Mainloop() error {
-	// 退出时清理本 daemon 启动的运行时副作用(adbd/dnsmasq/functionfs
-	// 挂载),否则 systemctl stop 强杀会残留,下次启动撞上(旧 adbd 占
-	// ep0、叠加挂载 → ADB 绑定失败)
+	// 退出清理 adbd/dnsmasq/functionfs,避免强杀残留污染下次启动
 	defer usb.CleanupRuntime()
 
 	// IPC server 由独立 goroutine 托管(挂了自动重建),不阻塞主循环
@@ -402,9 +399,8 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		rndis_qmult = ""
 	}
 
-	// 按 --gadget 名称序列构造模式(顺序 = 切换顺序,默认 rndis → adb);
-	// 每个条目可用 `name.N` 指定初始 submode(如 rndis.1),默认 0。
-	// 同名多条目允许(如 --gadget rndis.0 --gadget rndis.1 各成一个模式)。
+	// 按 --gadget 序列构造模式(顺序 = 切换顺序);`name.N` 指定初始
+	// submode,同名多条目各成一个模式。
 	gadgets := cmd.Gadgets
 	if len(gadgets) == 0 {
 		gadgets = []string{"rndis", "adb"}

@@ -89,22 +89,16 @@ func (this *UsbGadgetRndis) resolve_ifname(ctx *UsbGadgetFunctionContext) string
 	return name
 }
 
-// effect 在 add 之后、绑定(Enable)之前执行 —— 绑定前 configfs 未锁定,
-// gadget 级属性/OS 描述符可写。MAC 已在 add(libusbgx)里写入,这里写
-// ID/class/strings/os_desc 并清场。值随模式固定(RNDIS:18d1:4ee4)。
+// effect 在 add 之后、绑定(Enable)之前写 gadget 属性/strings/os_desc
+// (绑定前 configfs 未锁定);MAC 已在 add 里写入。
 func (this *UsbGadgetRndis) effect(ctx *UsbGadgetFunctionContext) error {
 	instance := this.get_instance()
 	if instance == "" {
 		return fmt.Errorf("rndis instance not set after add")
 	}
 
-	// Override device IDs and class codes — libusbgx 创建 gadget 的默认
-	// 值(0x0000/0x0000)与 RNDIS 模式需要值不同。
-	// bcdUSB 0x0200;idVendor/idProduct 18d1:4ee4(Google Nexus/Pixel
-	// tether+debug);bcdDevice 0x0223 对齐手机(OPPO 2.23)。
-	// 设备级 class 0/0/0:与真实 Android 手机 USB 共享一致,分类全在
-	// 接口/IAD 级 —— 之前写 EF/02/01(Misc-IAD)时 Win7 开启 ICS 后
-	// RNDIS 驱动 null pointer 蓝屏,手机不会。
+	// 18d1:4ee4 + bcdDevice 0x0223 对齐真实 Android 手机;设备级
+	// class 0/0/0(此前 EF/02/01 在 Win7 开 ICS 后 RNDIS 驱动蓝屏)。
 	if err := ctx.C.SetGadgetAttrs(0x0200, 0x18d1, 0x4ee4, 0x0223, 0x00, 0x00, 0x00); err != nil {
 		return err
 	}
@@ -112,8 +106,7 @@ func (this *UsbGadgetRndis) effect(ctx *UsbGadgetFunctionContext) error {
 		return err
 	}
 
-	// 配置级属性对齐手机枚举:MaxPower 500(写 120 会被部分 host 视为
-	// 低功耗设备)+ 配置名 "RNDIS"
+	// MaxPower/配置名对齐手机枚举(120 会被部分 host 视为低功耗设备)
 	if err := ctx.C.SetConfigName("RNDIS"); err != nil {
 		return err
 	}
@@ -121,10 +114,8 @@ func (this *UsbGadgetRndis) effect(ctx *UsbGadgetFunctionContext) error {
 		return err
 	}
 
-	// ---- MS OS Descriptor 1.0 (Extended Compat ID) -----------------------
-	// Windows 的 inbox RNDIS 驱动(usb8023.sys)靠 Extended Compat ID 的
-	// compatible_id="RNDIS" 匹配接口并自动安装驱动;没有 os_desc 时
-	// Windows 枚举不到 RNDIS 接口,设备管理器显示"其他设备"(代码 28)。
+	// MS OS Descriptor (Extended Compat ID):Windows 的 usb8023 驱动靠
+	// compatible_id="RNDIS" 自动匹配;缺失时设备管理器显示"其他设备"(代码 28)。
 	if err := ctx.C.SetOsDesc(0xcd, "MSFT100"); err != nil {
 		return err
 	}
@@ -132,9 +123,8 @@ func (this *UsbGadgetRndis) effect(ctx *UsbGadgetFunctionContext) error {
 		return err
 	}
 
-	// 清场:只停本模式(RNDIS)自己的 dnsmasq —— 切走(ADB)后它空转,
-	// 回来时 effect 先杀再启;adbd 属于 ADB 模式,由 adb effect 自管,
-	// 不在 RNDIS 里碰它(effect 不做跨模式副作用,避免耦合)。
+	// 只停本模式自己的 dnsmasq(切走期间空转,回来时先杀再启);
+	// adbd 归 ADB 模式自管,不在此碰(避免跨模式耦合)。
 	stop_dnsmasq_all()
 
 	// NOTE: 不要在这里绑定 UDC。绑定只有一次,在 Apply 的 Enable。

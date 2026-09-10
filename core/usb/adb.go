@@ -56,14 +56,8 @@ type UsbGadgetAdb struct {
 	UsbGadgetFunctionBase
 }
 
-// add uses gc -a ffs, inherited from UsbGadgetFunctionBase, to create the
-// FFS function.  gc handles the gadget directory, config, and function
-// symlink; effect() writes the subpath overrides and performs the FFS-
-// specific setup (mount, adbd).
-
-// add 经 libusbgx 创建 ffs 函数并 link 进 config(instance "adb" →
-// functions/ffs.adb)。FFS 函数的 ep0 描述符由 adbd 提供,这里只建
-// 函数 + link;UDC 绑定在 Apply 的 Enable。
+// add 创建 ffs 函数并 link 进 config(instance "adb" → functions/ffs.adb):
+// ep0 描述符由 adbd 提供,这里只建函数 + link;UDC 绑定在 Apply 的 Enable。
 func (this *UsbGadgetAdb) add(ctx *UsbGadgetFunctionContext) error {
 	this.set_instance("adb")
 
@@ -73,18 +67,15 @@ func (this *UsbGadgetAdb) add(ctx *UsbGadgetFunctionContext) error {
 	return nil
 }
 
-// effect 在 add 之后、绑定之前执行。写入 ID/class/strings 并做 FFS-
-// 特定设置(mount functionfs、启动 adbd)。
-
+// effect 写 gadget 属性/strings,挂载 functionfs 并启动 adbd(须在
+// add 之后、UDC 绑定之前)。
 func (this *UsbGadgetAdb) effect(ctx *UsbGadgetFunctionContext) error {
 	instance := this.get_instance()
 	if instance == "" {
 		return fmt.Errorf("adb instance not set after add")
 	}
 
-	// Override device IDs and class codes — libusbgx 默认值(0x0000/0x0000)
-	// 与 ADB 模式需要值不同(Google 0x18d1:0x4ee7)。
-	// 设备级 class 0/0/0:与真实 Android 手机一致,分类在接口级。
+	// class 0/0/0 + Google 0x18d1:0x4ee7,对齐真实 Android 手机枚举
 	if err := ctx.C.SetGadgetAttrs(0x0200, 0x18d1, 0x4ee7, 0x0000, 0x00, 0x00, 0x00); err != nil {
 		return err
 	}
@@ -92,9 +83,6 @@ func (this *UsbGadgetAdb) effect(ctx *UsbGadgetFunctionContext) error {
 		return err
 	}
 
-	// Mount functionfs for adbd.
-	// functionfs 可能被叠加挂载(残留),循环卸干净再挂单层,
-	// 否则旧 adbd 占用 ep0,新 adbd 起来即死、Enable 绑定失败。
 	umount_ffs(this.ffs_path)
 	if err := os.MkdirAll(this.ffs_path, 0755); err != nil {
 		return fmt.Errorf("mkdir ffs path: %w", err)
@@ -103,11 +91,7 @@ func (this *UsbGadgetAdb) effect(ctx *UsbGadgetFunctionContext) error {
 		return fmt.Errorf("mount functionfs failed: %w, output: %s", err, string(out))
 	}
 
-	// 停掉本模式上次启动的 adbd(ours only — 见 kill_adbd),再启新的。
-	// 不碰 RNDIS 的 dnsmasq:它由 rndis effect/enable 自管
-	// (effect 不做跨模式副作用,避免耦合)。
 	kill_adbd()
-	time.Sleep(200 * time.Millisecond)
 
 	homedir, _ := os.UserHomeDir()
 	if homedir == "" {
@@ -121,16 +105,12 @@ func (this *UsbGadgetAdb) effect(ctx *UsbGadgetFunctionContext) error {
 		return fmt.Errorf("start adbd: %w", err)
 	}
 
-	// Remember the pid for kill_adbd's fallback when the handle is lost to
-	// a daemon restart.
+	// pid 文件供 kill_adbd 在句柄丢失(daemon 重启)时兜底
 	if err := os.WriteFile(adbdPidFile, []byte(strconv.Itoa(adbd_process.Process.Pid)+"\n"), 0644); err != nil {
 		log.Printf("WARN: cannot write %s: %v\n", adbdPidFile, err)
 	}
 
-	// Wait for adbd to write its ep0 descriptors; UDC won't bind without
-	// them.  Like /sbin/mobian-usb-gadget, the UDC itself is bound later by
-	// gc -e in enable_gadget() — binding here too would make gc -e fail with
-	// EBUSY and re-enumerate the host port twice.
+	// 等 adbd 写完 ep0 描述符,否则 UDC 绑定失败
 	time.Sleep(100 * time.Millisecond)
 
 	return nil
@@ -161,12 +141,8 @@ func merge_envs(extras []string) []string {
 	return env
 }
 
-// kill_adbd stops the adbd started by THIS daemon — precisely, never a
-// killall sweep: the stored process handle is used first; the pid file is
-// the fallback when the handle was lost to a daemon restart.  Before
-// signaling a pid-file pid, /proc/<pid>/comm is checked so a recycled pid
-// can't take down an unrelated process.  An adbd this daemon didn't start
-// (e.g. from /sbin/mobian-usb-gadget) is left alone.
+// kill_adbd 只停本 daemon 启动的 adbd(句柄优先,pid 文件兜底;pid 复用
+// 用 /proc/<pid>/comm 校验,不 killall 误伤他人启动的 adbd)。
 func kill_adbd() {
 	var proc *os.Process
 
@@ -201,7 +177,7 @@ func read_proc_comm(pid int) string {
 	return strings.TrimSpace(string(data))
 }
 
-// stop_process sends SIGTERM, waits up to 2s for exit, then SIGKILL.
+// stop_process 发 SIGTERM,最多等 2s,超时 SIGKILL。
 func stop_process(proc *os.Process) {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		log.Printf("WARN: cannot stop process %d: %v\n", proc.Pid, err)

@@ -1,9 +1,6 @@
 // Package gadget 是 libusbgx 的 cgo 封装:USB gadget 生命周期
-// (创建/清理/属性/OS 描述符/UDC 绑定)。
-//
-// 仓库不引入 libusbgx 源码或二进制:声明按公开 ABI 自写于 usbg_min.h
-// (字段/枚举值与上游核对);链接期符号由 libusbgx.symbols 生成的空桩
-// so 提供;运行时由设备预装的 libusbgx.so.2(soname 同名)接管。
+// (创建/清理/属性/OS 描述符/UDC 绑定)。声明自写于 usbg_min.h(见其
+// 头部说明);链接用符号桩,运行时加载设备预装的 libusbgx.so.2。
 package gadget
 
 /*
@@ -67,8 +64,7 @@ func (this *Ctx) Close() {
 	}
 }
 
-// CleanAll 拆除现有 gadget(disable + rm RECURSE),等价旧 `gc -c`。
-// 无 gadget 时是 no-op(全新设备)。
+// CleanAll 拆除现有 gadget(disable + rm RECURSE);无 gadget 时 no-op。
 func (this *Ctx) CleanAll() error {
 	if this.state == nil {
 		return fmt.Errorf("gadget ctx not initialised")
@@ -93,9 +89,8 @@ func (this *Ctx) CleanAll() error {
 	return nil
 }
 
-// CreateGadget 创建 gadget 骨架:gadget 目录 + 配置
-// (label "c1" + id 1 → configs/c1.1,与现项目目录一致)。
-// 属性由后续 Set*/effect 写入,UDC 绑定在最后 Enable。
+// CreateGadget 创建 gadget 目录 + 配置(label "c1" + id 1 →
+// configs/c1.1);属性由后续 Set*/effect 写入,UDC 绑定在最后 Enable。
 func (this *Ctx) CreateGadget() error {
 	if this.state == nil {
 		return fmt.Errorf("gadget ctx not initialised")
@@ -122,10 +117,8 @@ func (this *Ctx) CreateGadget() error {
 	return nil
 }
 
-// AddRndis 创建 rndis 函数并 link 进 config:
-// usbg_create_function → dev_addr/host_addr/qmult(usbg_f_net_set_attr_val,
-// qmult 为 0 时跳过)→ ifname 直写(只读 attr,"usb%d" 模式)→
-// add_config_function。instance 沿用 "rndis.1"(目录 functions/rndis.rndis.1)。
+// AddRndis 创建 rndis 函数(dev_addr/host_addr/qmult,ifname 直写)
+// 并 link 进 config;instance "rndis.1" → 目录 functions/rndis.rndis.1。
 func (this *Ctx) AddRndis(instance, dev_addr, host_addr, ifname string, qmult uint) error {
 	if this.gadget == nil || this.config == nil {
 		return fmt.Errorf("gadget not created")
@@ -174,7 +167,7 @@ func (this *Ctx) AddRndis(instance, dev_addr, host_addr, ifname string, qmult ui
 	return nil
 }
 
-// parse_mac 把 "02:12:34:56:78:9a" 解析进 C 结构 struct ether_addr。
+// parse_mac 解析 MAC 到 C 结构 struct ether_addr。
 func parse_mac(mac string) (C.struct_ether_addr, error) {
 	var addr C.struct_ether_addr
 
@@ -189,8 +182,8 @@ func parse_mac(mac string) (C.struct_ether_addr, error) {
 	return addr, nil
 }
 
-// write_attr 直写 configfs 属性文件(libusbgx 覆盖不到处专用:
-// rndis ifname 只读、config MaxPower 超 bMaxPower uint8 范围)。
+// write_attr 直写 configfs 属性文件(libusbgx 覆盖不到处:ifname 只读、
+// MaxPower 超 bMaxPower uint8)。
 func write_attr(path, value string) error {
 	// 常见失败原因:configfs 未挂载 / 权限 / 时序(link 后属性被锁定 EBUSY)
 	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
@@ -229,8 +222,7 @@ func (this *Ctx) AddFfs(instance string) error {
 	return nil
 }
 
-// SetGadgetAttrs 写 gadget 级属性(bcdUSB/idVendor/bcdDevice/class 等)。
-// 每次模式切换都全量重写,值随当前模式(RNDIS/ADB 的 VID/PID 不同)。
+// SetGadgetAttrs 写 gadget 级属性(每次 apply 全量重写,值随模式不同)。
 func (this *Ctx) SetGadgetAttrs(bcd_usb, id_vendor, id_product, bcd_device uint16, class, sub_class, protocol uint8) error {
 	if this.gadget == nil {
 		return fmt.Errorf("gadget not created")
@@ -359,7 +351,7 @@ func (this *Ctx) WriteConfigMaxPower(mA uint) error {
 	return write_attr(filepath.Join(this.config_fs, "configs", "c1.1", "MaxPower"), fmt.Sprintf("%d\n", mA))
 }
 
-// Enable 绑定 UDC(替代旧 `echo <udc> > UDC`)。绑定后内核才创建 usb0 接口。
+// Enable 绑定 UDC;绑定后内核才创建 usb0 接口。
 func (this *Ctx) Enable(udc string) error {
 	if this.gadget == nil {
 		return fmt.Errorf("gadget not created")

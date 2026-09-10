@@ -126,18 +126,6 @@ func (this *UsbGadgetFunctionBase) remove(ctx *UsbGadgetFunctionContext) error {
 	return nil
 }
 
-// type UsbGadgetControllerConfig struct {
-// 	Vendor         string // vendor code in hex like `0x0001`
-// 	Product        string // product code in hex like `0x0001`
-// 	DeviceClass    string
-// 	DeviceSubClass string
-// 	DeviceProtocol string
-
-// 	Serialnumber string
-// 	Manufacturer string
-// 	ProductName  string
-// }
-
 type UsbGadgetController struct {
 	ctx *gadget.Ctx
 
@@ -154,21 +142,14 @@ func (this *UsbGadgetController) reset_functions(targets bool) {
 	}
 }
 
-// UpdateGadget 兼容入口:instance 固定(rndis.1/adb)后不再需要 gc -l
-// 回读同步,无操作。
+// UpdateGadget 兼容入口:instance 固定后无需回读同步,无操作。
 func (this *UsbGadgetController) UpdateGadget() []error {
 	return nil
 }
 
 func (this *UsbGadgetController) apply_functions() map[string]error {
-	// TODO check diff between target and current
-	// if !this.target_functions_changed {
-	// 	return nil
-	// }
-
 	function_errors := make(map[string]error)
 
-	// 每个函数实现访问 gadget 的上下文(写走 cgo,config_fs 供只读)
 	fctx := &UsbGadgetFunctionContext{C: this.ctx, ConfigFs: this.config_fs}
 
 	// 拆掉旧 gadget 后重建。拆解(usbg_rm_gadget)在本平台(ChipIdea)是
@@ -226,7 +207,6 @@ func (this *UsbGadgetController) apply_functions() map[string]error {
 			}
 		}()
 
-		// remove 是 no-op(下轮 Apply 的 CleanAll 统一拆除);仍保留错误面
 		if err := function.remove(fctx); err != nil {
 			function_errors["call_remove_"+function.get_path()] = err
 		}
@@ -261,8 +241,6 @@ func (this *UsbGadgetController) apply_functions() map[string]error {
 			safeRemove(index, function)
 		}
 	}
-
-	// this.target_functions_changed = len(function_errors) > 0
 
 	if len(function_errors) == 0 {
 		return nil

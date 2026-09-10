@@ -84,8 +84,7 @@ func main() {
 			os.Exit(2)
 		}
 
-		// SIGTERM/SIGINT → 优雅退出:Stop 关主循环,Mainloop 的 defer
-		// 清理运行时副作用(adbd/dnsmasq/functionfs),systemctl stop 干净
+		// SIGTERM/SIGINT → 优雅退出(Mainloop defer 清理运行时副作用)
 		sig_chan := make(chan os.Signal, 1)
 		signal.Notify(sig_chan, unix.SIGTERM, unix.SIGINT)
 		go func() {
