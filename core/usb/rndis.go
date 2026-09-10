@@ -26,6 +26,7 @@ type UsbGadgetRndis struct {
 	connection_prefix string
 	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip):0 字节取上游网段字节;主机字节用于无 DHCP 时的 ICS 静态探测(192.168.137.xx)
 	client_timeout    time.Duration // 从模式总超时:等网卡出现 + DHCP 探测(--rndis-client-timeout)
+	ics_timeout       time.Duration // ICS 静态网关探测超时(--rndis-ics-timeout)
 
 	dev_addr     string
 	host_addr    string
@@ -282,7 +283,7 @@ func (this *UsbGadgetRndis) enable_ics_static_mode(ifname string) error {
 		return this.fallback_to_gateway_mode()
 	}
 
-	if !this.probe_ics_dns(gateway, 2*time.Second) {
+	if !this.probe_ics_dns(gateway, this.ics_timeout) {
 		log.Printf("WARN: ics gateway %s has no DNS proxy, fallback to gateway mode\n", gateway)
 		return this.fallback_to_gateway_mode()
 	}
@@ -489,9 +490,9 @@ func (this *UsbGadgetRndis) probe_upstream_dhcp(ifname string, timeout time.Dura
 		// 探测预算耗尽时 CommandContext 会 SIGKILL udhcpc(err 只有
 		// "signal: killed"),补上真实原因(context deadline)方便排查
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = fmt.Errorf("udhcpc on %s: %w (probe budget %s exhausted), output: %s", ifname, ctxErr, timeout, string(out))
+			err = fmt.Errorf("udhcpc on %s: %w (probe budget %s exhausted), output: %s", ifname, ctxErr, timeout, strings.TrimSpace(string(out)))
 		} else {
-			err = fmt.Errorf("udhcpc on %s: %w, output: %s", ifname, err, string(out))
+			err = fmt.Errorf("udhcpc on %s: %w, output: %s", ifname, err, strings.TrimSpace(string(out)))
 		}
 		return netip.Addr{}, netip.Addr{}, nil, err
 	}
@@ -784,13 +785,14 @@ func SnapshotUsbGadgetRndis(instance string) *UsbGadgetRndis {
 	return rndis
 }
 
-func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, client_timeout time.Duration, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
+func NewUsbGadgetRndis(ip_addr netip.Prefix, connection_prefix string, dev_addr string, host_addr string, ifname string, qmult string, dnsmasq_args []string, client_ip netip.Addr, client_timeout time.Duration, ics_timeout time.Duration, serial_number string, manufacturer string, product string) *UsbGadgetRndis {
 	rndis := &UsbGadgetRndis{}
 
 	rndis.ip_addr = ip_addr
 	rndis.connection_prefix = connection_prefix
 	rndis.client_ip = client_ip
 	rndis.client_timeout = client_timeout
+	rndis.ics_timeout = ics_timeout
 	rndis.dev_addr = dev_addr
 	rndis.host_addr = host_addr
 	rndis.ifname = ifname

@@ -71,7 +71,7 @@ flowchart TD
 | 进入/退出子模式选择    | LED 先关闭 `--submode-led-duration` 提示,结束后显示子模式状态 |
 | 子模式切换(选择中短按) | LED 关闭                                                      |
 | 子模式状态             | 0 → 常亮;1 → 慢闪(500ms on / 500ms off)                       |
-| `cli ipc toggle-led`   | 1 关闭所有 LED(立即生效,不等待下一次模式切换);2 恢复          |
+| `cli ipc led`           | `led off` 关闭所有 LED(立即生效);`led on` 恢复       |
 | 长按关机触发           | 反向逐颗亮起 500ms(最后至最前),随后执行关机命令               |
 
 ## 构建
@@ -190,7 +190,7 @@ sudo systemctl enable --now wifi-stick-usb-switcher.service
 ```bash
 systemctl status wifi-stick-usb-switcher
 journalctl -u wifi-stick-usb-switcher -f   # 看到 "INFO daemon started" + 模式切换日志
-/usr/local/bin/usb-switcher ipc toggle-led 0   # 与 daemon 的 IPC 握手,输出 "led: on"
+/usr/local/bin/usb-switcher ipc led 0   # 与 daemon 的 IPC 握手,输出 "led: on"
 ```
 
 ### 6. 调试 / 前台运行
@@ -231,7 +231,8 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                    |
 | `-a, --rndis-ip`           | `10.22.33.1/24`                    | RNDIS 接口 IP(带前缀),DHCP 池由此自动推导           |
 | `--rndis-client-ip`        | `0.0.0.33`                         | 从模式客户端 IP:模板(DHCP 租约时 0 字节取上游网段字节),末字节用于 ICS 静态探测(`192.168.137.x`) |
-| `--rndis-client-timeout`   | `5s`                               | 从模式总超时(等网卡 + DHCP 探测)                    |
+| `--rndis-client-timeout`   | `1.5s`                             | 从模式总超时(等网卡 + DHCP 探测)                    |
+| `--rndis-ics-timeout`      | `2s`                               | ICS 静态网关探测超时(DNS query 到 `192.168.137.1:53`) |
 | `-i, --rndis-ifname`       | `usb0`                             | RNDIS 接口名,`ip link` 可查                         |
 | `--rndis-qmult`            | `8`                                | usb ifname qmult(队列长度乘数),0 不写               |
 | `--rndis-serial-number`    | `wifi-stick-miruku`                | RNDIS 模式的 USB 序列号字符串                       |
@@ -252,11 +253,15 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 
 通过 unix socket(`/tmp/<PROJECT_IDENT>.sock`)与 daemon 交互。
 
-| 命令         | 参数 | 说明               | 输出                   |
-| :----------- | :--- | :----------------- | :--------------------- |
-| `toggle-led` | `0`  | 查询当前 LED 状态  | `led: on` / `led: off` |
-| `toggle-led` | `1`  | 关闭 LED(立即生效) | `led: off`             |
-| `toggle-led` | `2`  | 开启 LED(立即生效) | `led: on`              |
+| 命令         | 参数                | 说明                                                         | 输出                   |
+| :----------- | :------------------ | :----------------------------------------------------------- | :--------------------- |
+| `led`        | 无 / `get`          | 查询当前 LED 状态                                            | `led: on` / `led: off` |
+| `led`        | `off` / `0`         | 关闭 LED(立即生效)                                           | `led: off`             |
+| `led`        | `on` / `1`          | 开启 LED(立即生效)                                           | `led: on`              |
+| `gadget`     | 无                  | 查询当前 gadget(名称 + submode)                              | `gadget: rndis.1`      |
+| `gadget`     | `name[.submode]`    | 切换 gadget:换模式走完整重建;仅换 submode 不重建(直接重配网络) | `gadget: rndis.1`      |
+| `status`     | 无                  | 查询 daemon 状态:`initing` / `running` / `effecting::gadget::mode`(重建)/ `effecting::gadget::submode`(重配网络)/ `shutting_down`;当前是哪个 gadget 用 `gadget` 查 | `status: running`      |
+| `tap`        | `tap`/`long`/`multi n` | 注入虚拟按键(测试用)                                        | `button: tap` 等       |
 
 | 参数                | 默认值 | 说明              |
 | :------------------ | :----- | :---------------- |
@@ -265,9 +270,12 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--dial-retry`      | `1s`   | 连接重试间隔      |
 
 ```bash
-./cli ipc toggle-led 0   # 查询
-./cli ipc toggle-led 1   # 关灯
-./cli ipc toggle-led 2   # 开灯
+./cli ipc led                 # 查询 LED
+./cli ipc led off             # 关灯
+./cli ipc gadget              # 查询当前 gadget
+./cli ipc gadget rndis.1      # 切到 RNDIS 从模式(不重建 gadget)
+./cli ipc gadget adb          # 切到 ADB(完整重建)
+./cli ipc status              # 查询 daemon 状态
 ```
 
 `cli version` 输出编译信息(`CommitHash` / `BuildTime`)。

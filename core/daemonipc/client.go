@@ -37,6 +37,20 @@ func InitClient() (*IPCFramework, IPCClientRespChannel) {
 	)
 
 	IPClient.RegisterHandler(
+		PACKAGE_STATUS_RESP,
+		func(this *IPCFramework, status string) {
+			channel <- "status: " + status
+		},
+	)
+
+	IPClient.RegisterHandler(
+		PACKAGE_GADGET_RESP,
+		func(this *IPCFramework, gadget string) {
+			channel <- "gadget: " + gadget
+		},
+	)
+
+	IPClient.RegisterHandler(
 		PACKAGE_SIMULATE_BUTTON_RESP,
 		func(this *IPCFramework, action string) {
 			channel <- "button: " + action

@@ -11,6 +11,10 @@ const (
 	PACKAGE_TOGGLE_LED_RESP      IPCPackageType = 1025
 	PACKAGE_SIMULATE_BUTTON      IPCPackageType = 1026
 	PACKAGE_SIMULATE_BUTTON_RESP IPCPackageType = 1027
+	PACKAGE_GADGET               IPCPackageType = 1028
+	PACKAGE_GADGET_RESP          IPCPackageType = 1029
+	PACKAGE_STATUS               IPCPackageType = 1030
+	PACKAGE_STATUS_RESP          IPCPackageType = 1031
 )
 
 type ToggleLEDTarget uint8

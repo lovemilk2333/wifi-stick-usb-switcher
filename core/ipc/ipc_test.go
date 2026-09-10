@@ -63,13 +63,13 @@ func TestListCommands(t *testing.T) {
 
 	var toggle *IPCCommandDesc
 	for i := range descs {
-		if descs[i].Name == "toggle-led" {
+		if descs[i].Name == "led" {
 			toggle = &descs[i]
 			break
 		}
 	}
 	if toggle == nil {
-		t.Fatalf("toggle-led not listed")
+		t.Fatalf("led not listed")
 	}
 	if toggle.PackageType != daemonipc.PACKAGE_TOGGLE_LED {
 		t.Fatalf("unexpected package type %v", toggle.PackageType)

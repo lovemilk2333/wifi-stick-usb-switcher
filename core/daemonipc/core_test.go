@@ -29,6 +29,8 @@ func (d *fakeDaemon) SetTurnOffLeds(off bool) { d.off = off }
 func (d *fakeDaemon) SimulateButton(target SimulateButtonTarget, count int) error {
 	return nil
 }
+func (d *fakeDaemon) RequestGadget(spec string) (string, error) { return "rndis.0", nil }
+func (d *fakeDaemon) RequestStatus() string                     { return "running" }
 
 func TestServerParseDataUsesTypeinject(t *testing.T) {
 	server := InitServer(&fakeDaemon{})

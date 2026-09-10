@@ -39,7 +39,8 @@ type DaemonCmd struct {
 	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
 	RndisClientIP        string           `arg:"--rndis-client-ip" default:"0.0.0.33" help:"the client IP of the stick in RNDIS client submode: template (x.x.x.x, zero bytes take the upstream subnet bytes, e.g. 0.0.22.33) for DHCP leases; its last byte is used for the static ICS probe (192.168.137.x)"`
-	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"5s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 5s, 30s"`
+	RndisClientTimeout   time.Duration    `arg:"--rndis-client-timeout" default:"1.5s" help:"the total timeout of the RNDIS client submode, including waiting for the network interface and DHCP probing, such as 5s, 30s"`
+	RndisIcsTimeout      time.Duration    `arg:"--rndis-ics-timeout" default:"2s" help:"the timeout of the static ICS gateway probe (DNS query to 192.168.137.1:53), such as 1s, 5s"`
 	RndisUsbIfname       string           `arg:"-i,--rndis-ifname" default:"usb0" help:"usb ifname name to create for RNDIS"`
 	RndisQmult           uint             `arg:"--rndis-qmult" default:"8" help:"usb ifname qmult (queue length multiplier) config for RNDIS"`
 	RndisSerialNumber    string           `arg:"--rndis-serial-number" default:"wifi-stick-miruku" help:"the serial number string of the rndis usb gadget device"`
@@ -102,6 +103,134 @@ type Daemon struct {
 
 	// Stop()(SIGTERM/SIGINT)关闭,Mainloop select 退出并 defer 清理
 	stop_chan chan struct{}
+
+	// gadget IPC 请求:IPC goroutine 投递、Tick(mainloop)消费执行 ——
+	// current_mode/submode 只由 mainloop 写,避免跨 goroutine 竞态
+	gadget_req_chan chan GadgetRequest
+
+	// status 是 daemon 状态字符串(mainloop 写、IPC 读,原子):
+	// initing / running / effecting::gadget::mode|submode / shutting_down
+	status atomic.Value
+	// effect_kind 是本次 effect 的维度(mode=重建 / submode=重配网络),
+	// 供 status 区分;具体 gadget 值用 `ipc gadget` 查
+	effect_kind string
+}
+
+// update_status 刷新状态字符串(mainloop 线程;effecting 由 apply_function
+// goroutine 置 mode_changing,Tick 读到后反映)。
+func (this *Daemon) update_status() {
+	switch {
+	case this.shutting_down:
+		this.status.Store("shutting_down")
+	case this.mode_changing:
+		kind := this.effect_kind
+		if kind == "" {
+			kind = "mode"
+		}
+		this.status.Store("effecting::gadget::" + kind)
+	default:
+		this.status.Store("running")
+	}
+}
+
+// RequestStatus 返回当前状态(mainloop 仅写、IPC 直读原子值,
+// initing 阶段也能应答)。
+func (this *Daemon) RequestStatus() string {
+	if s, ok := this.status.Load().(string); ok {
+		return s
+	}
+	return "unknown"
+}
+
+// GadgetRequest 是 IPC 发起的 gadget 查询/切换请求:Spec 为空表示查询,
+// 否则为 `name[.submode]`;Resp 回传 mainloop 的执行结果。
+type GadgetRequest struct {
+	Spec string
+	Resp chan GadgetResponse
+}
+
+type GadgetResponse struct {
+	Gadget string
+	Err    error
+}
+
+// RequestGadget 供 IPC 调用:投递查询/切换请求给 mainloop 并等待结果。
+func (this *Daemon) RequestGadget(spec string) (string, error) {
+	req := GadgetRequest{Spec: spec, Resp: make(chan GadgetResponse, 1)}
+
+	select {
+	case this.gadget_req_chan <- req:
+	case <-time.After(5 * time.Second):
+		return "", fmt.Errorf("gadget request not accepted (daemon busy)")
+	}
+
+	select {
+	case resp := <-req.Resp:
+		return resp.Gadget, resp.Err
+	case <-time.After(5 * time.Second):
+		return "", fmt.Errorf("gadget request timed out")
+	}
+}
+
+// current_gadget_spec 返回当前 gadget 的可解析描述(`name.submode`)。
+func (this *Daemon) current_gadget_spec() string {
+	mode := this.modes[this.current_mode]
+	return fmt.Sprintf("%s.%d", mode.GetName(), mode.GetSubmode())
+}
+
+// handle_gadget_requests 消费 IPC 投递的查询/切换请求(仅在 mainloop 线程)。
+func (this *Daemon) handle_gadget_requests() {
+	for {
+		select {
+		case req := <-this.gadget_req_chan:
+			req.Resp <- this.handle_gadget_request(req.Spec)
+		default:
+			return
+		}
+	}
+}
+
+func (this *Daemon) handle_gadget_request(spec string) GadgetResponse {
+	spec = strings.TrimSpace(spec)
+	if spec == "" { // 查询
+		return GadgetResponse{Gadget: this.current_gadget_spec()}
+	}
+
+	name, submode, err := parse_gadget_spec(spec)
+	if err != nil {
+		return GadgetResponse{Err: err}
+	}
+
+	index := -1
+	for i, mode := range this.modes {
+		if mode.GetName() == name {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return GadgetResponse{Err: fmt.Errorf("no gadget `%s` in the configured sequence", name)}
+	}
+	if submode > this.modes[index].MaxSubmode() {
+		return GadgetResponse{Err: fmt.Errorf("gadget `%s` has no submode %d (max %d)", name, submode, this.modes[index].MaxSubmode())}
+	}
+
+	mode := this.modes[index]
+	switch {
+	case index != this.current_mode:
+		// 换模式:完整重建
+		this.current_mode = index
+		mode.SetSubmode(submode)
+		this.mode_changed = true
+		this.submode_changed = false
+	case mode.GetSubmode() != submode:
+		// 同模式换 submode:不重建,直接重配网络(同"选择中短按")
+		mode.SetSubmode(submode)
+		this.mode_changed = true
+		this.submode_changed = true
+	}
+
+	return GadgetResponse{Gadget: this.current_gadget_spec()}
 }
 
 // Stop 请求 daemon 优雅退出(幂等)。
@@ -122,8 +251,10 @@ var LED_SUBMODE_MODES = []*led.LedMode{
 
 func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
 	daemon := &Daemon{
-		stop_chan: make(chan struct{}),
+		stop_chan:       make(chan struct{}),
+		gadget_req_chan: make(chan GadgetRequest, 4),
 	}
+	daemon.status.Store("initing")
 
 	if err := daemon.init(cmd); err != nil {
 		return nil, err
@@ -331,6 +462,10 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		return fmt.Errorf("`--rndis-client-timeout` must be positive")
 	}
 
+	if cmd.RndisIcsTimeout <= 0 {
+		return fmt.Errorf("`--rndis-ics-timeout` must be positive")
+	}
+
 	// 长按关机阈值必须大于长按阈值,否则长按会先触发子模式选择再触发关机
 	if cmd.ShutdownThreshold > 0 && cmd.ShutdownThreshold <= cmd.LongTapThreshold {
 		return fmt.Errorf("`--shutdown-threshold` must be greater than `--long-tap-threshold`")
@@ -416,7 +551,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		var mode usb.UsbGadgetFunction
 		switch name {
 		case "rndis":
-			mode = usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct)
+			mode = usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisIcsTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct)
 		case "adb":
 			mode = usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv)
 		default:
@@ -548,6 +683,8 @@ func (this *Daemon) current_interpreter() *led.LedInterpreter {
 }
 
 func (this *Daemon) Tick() {
+	this.update_status()
+
 	// 长按关机检测,优先级高于一切事件处理:按住时长 >= shutdown_threshold
 	// 立即关机 —— 默认按键是 KEY_RESTART,松开事件会触发系统重启,
 	// poweroff 必须在按住期间调用,不能等松开
@@ -558,6 +695,7 @@ func (this *Daemon) Tick() {
 	if this.shutdown_threshold > 0 {
 		if st := this.input_device.State(); st != nil && st.Duration >= this.shutdown_threshold {
 			this.shutting_down = true
+			this.update_status() // 立即反映 shutting_down(do_shutdown 之后不再有 tick)
 			log.Printf("WARN: long-press shutdown triggered\n")
 			this.do_shutdown() // 同步执行:完成后 Mainloop 检测 shutting_down 退出进程
 			return
@@ -610,6 +748,9 @@ func (this *Daemon) Tick() {
 		}
 	}
 
+	// 消费 IPC 投递的 gadget 查询/切换请求(与本 tick 的按键事件同级生效)
+	this.handle_gadget_requests()
+
 	// 进入/退出子模式选择的 LED 关闭期结束后显示 submode 状态。
 	// loop_count >= 1 表示 submode_entry_mode(Off→Wait(duration)→On)
 	// 已完成一轮,即关闭了 submode_led_duration 时间。
@@ -623,6 +764,11 @@ func (this *Daemon) Tick() {
 	if this.mode_changed && !this.mode_changing {
 		this.mode_changed = false
 		this.mode_changing = true
+		// 本次 effect 的维度:submode 切换只重配网络,其余走完整重建
+		this.effect_kind = "mode"
+		if this.submode_changed {
+			this.effect_kind = "submode"
+		}
 
 		for _, interpreter := range this.interpreters {
 			if interpreter != nil {

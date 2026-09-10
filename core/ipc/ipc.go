@@ -19,12 +19,14 @@ import (
 var ipc_client_chan daemonipc.IPCClientRespChannel
 
 var ipc_mapping = map[string]daemonipc.IPCPackageType{
-	"toggle-led": daemonipc.PACKAGE_TOGGLE_LED,
-	"tap":        daemonipc.PACKAGE_SIMULATE_BUTTON,
+	"led":    daemonipc.PACKAGE_TOGGLE_LED,
+	"tap":    daemonipc.PACKAGE_SIMULATE_BUTTON,
+	"gadget": daemonipc.PACKAGE_GADGET,
+	"status": daemonipc.PACKAGE_STATUS,
 }
 
 type IPCCmd struct {
-	Command        string        `arg:"positional" help:"IPC command name (e.g. toggle-led)"`
+	Command        string        `arg:"positional" help:"IPC command name (e.g. led)"`
 	Timeout        time.Duration `arg:"-t,--timeout" default:"10s" help:"wait IPC response timeout"`
 	ConnectTimeout time.Duration `arg:"--connect-timeout" default:"5s" help:"IPC dial and handshake timeout"`
 	DialRetry      time.Duration `arg:"--dial-retry" default:"1s" help:"IPC dial retry interval"`
@@ -113,6 +115,19 @@ func RegisterHandler(package_type daemonipc.IPCPackageType, builder any) {
 func init() {
 	RegisterHandler(daemonipc.PACKAGE_TOGGLE_LED, build_toggle_led)
 	RegisterHandler(daemonipc.PACKAGE_SIMULATE_BUTTON, build_tap)
+	RegisterHandler(daemonipc.PACKAGE_GADGET, build_gadget)
+	RegisterHandler(daemonipc.PACKAGE_STATUS, build_status)
+}
+
+// build_status maps `ipc status` to the status package payload (no args).
+func build_status(_ string) ([]any, error) {
+	return []any{""}, nil
+}
+
+// build_gadget maps `ipc gadget [spec]` to the gadget package payload:
+// an empty spec queries the current gadget, `name[.submode]` switches to it.
+func build_gadget(spec string) ([]any, error) {
+	return []any{strings.TrimSpace(spec)}, nil
 }
 
 // build_tap maps a CLI subcommand to a SimulateButtonTarget (+ count for multi).

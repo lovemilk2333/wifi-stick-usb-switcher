@@ -56,6 +56,12 @@ type UsbGadgetAdb struct {
 	UsbGadgetFunctionBase
 }
 
+// GetName 返回用户可见的 gadget 名(`adb`)。内核函数类型是 `ffs`
+// (base._type,决定 configfs 目录 functions/ffs.adb),两者不同。
+func (this *UsbGadgetAdb) GetName() string {
+	return "adb"
+}
+
 // add 创建 ffs 函数并 link 进 config(instance "adb" → functions/ffs.adb):
 // ep0 描述符由 adbd 提供,这里只建函数 + link;UDC 绑定在 Apply 的 Enable。
 func (this *UsbGadgetAdb) add(ctx *UsbGadgetFunctionContext) error {
