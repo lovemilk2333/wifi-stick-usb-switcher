@@ -1,48 +1,21 @@
-// Package gadget 是 libusbgx(submodule core/usb/gadget/libusbgx,LGPL-2.1)
-// 的 cgo 封装:USB gadget 生命周期(创建/清理/属性/OS 描述符/UDC 绑定)。
+// Package gadget 是 libusbgx 的 cgo 封装:USB gadget 生命周期
+// (创建/清理/属性/OS 描述符/UDC 绑定)。
 //
-// 调用链参考 gc(gadget/gc,GPL 仅本地参考)的 libusbgx 用法,但不复制其代码。
-// 头文件:libusbgx 源码头 + meson 生成的 usbg_version.h(纯版本宏,架构无关,
-// 取 amd64 构建产物即可);链接:Makefile 经 CGO_LDFLAGS 注入
-// -L build/libusbgx/<arch> -lusbgx(动态链接,soname libusbgx.so.2,生产设备预装)。
+// 仓库不引入 libusbgx 源码或二进制:声明按公开 ABI 自写于 usbg_min.h
+// (字段/枚举值与上游核对);链接期符号由 libusbgx.symbols 生成的空桩
+// so 提供;运行时由设备预装的 libusbgx.so.2(soname 同名)接管。
 package gadget
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/libusbgx/include -I${SRCDIR}/../../../build/libusbgx/amd64
-#include <stdio.h>
+#cgo CFLAGS: -I${SRCDIR}
 #include <stdlib.h>
-#include <string.h>
-#include <netinet/ether.h>
-#include <usbg/usbg.h>
-#include <usbg/function/net.h>
-
-// mac_to_ether 把 "02:12:34:56:78:9a" 解析进 struct ether_addr;失败返回 -1
-static int mac_to_ether(const char *s, struct ether_addr *out) {
-	unsigned int b[6];
-	if (sscanf(s, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
-		return -1;
-	for (int i = 0; i < 6; i++)
-		out->ether_addr_octet[i] = (unsigned char)b[i];
-	return 0;
-}
-
-// write_attr 直写 configfs 属性文件 —— 只用于 libusbgx 覆盖不到的两处:
-//   - rndis ifname(net 属性表里标只读,内核要求绑定前写 "usb%d" 模式)
-//   - config MaxPower(现状写 500,libusbgx 的 bMaxPower 是 uint8 装不下)
-// 成功返回 0,失败返回 -1
-static int write_attr(const char *path, const char *value) {
-	FILE *f = fopen(path, "w");
-	if (!f)
-		return -1;
-	int ok = fputs(value, f) >= 0;
-	fclose(f);
-	return ok ? 0 : -1;
-}
+#include "usbg_min.h"
 */
 import "C"
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"unsafe"
@@ -150,10 +123,9 @@ func (this *Ctx) CreateGadget() error {
 }
 
 // AddRndis 创建 rndis 函数并 link 进 config:
-// usbg_create_function → dev_addr/host_addr/qmult(usbg_f_net_set_*,单个
-// setter,qmult 为 0 时跳过,与现状一致)→ ifname sysfs 直写(只读 attr,
-// 值取 ifname 的 "usb%d" 模式)→ add_config_function。
-// instance 沿用 "rndis.1"(目录 functions/rndis.rndis.1,与现状一致)。
+// usbg_create_function → dev_addr/host_addr/qmult(usbg_f_net_set_attr_val,
+// qmult 为 0 时跳过)→ ifname 直写(只读 attr,"usb%d" 模式)→
+// add_config_function。instance 沿用 "rndis.1"(目录 functions/rndis.rndis.1)。
 func (this *Ctx) AddRndis(instance, dev_addr, host_addr, ifname string, qmult uint) error {
 	if this.gadget == nil || this.config == nil {
 		return fmt.Errorf("gadget not created")
@@ -169,31 +141,28 @@ func (this *Ctx) AddRndis(instance, dev_addr, host_addr, ifname string, qmult ui
 
 	nf := C.usbg_to_net_function(f)
 
-	var dev, host C.struct_ether_addr
-	dev_c := C.CString(dev_addr)
-	defer C.free(unsafe.Pointer(dev_c))
-	host_c := C.CString(host_addr)
-	defer C.free(unsafe.Pointer(host_c))
-	if C.mac_to_ether(dev_c, &dev) != 0 {
-		return fmt.Errorf("invalid rndis dev_addr: %s", dev_addr)
+	dev, err := parse_mac(dev_addr)
+	if err != nil {
+		return fmt.Errorf("invalid rndis dev_addr: %w", err)
 	}
-	if C.mac_to_ether(host_c, &host) != 0 {
-		return fmt.Errorf("invalid rndis host_addr: %s", host_addr)
+	host, err := parse_mac(host_addr)
+	if err != nil {
+		return fmt.Errorf("invalid rndis host_addr: %w", err)
 	}
-	if ret := C.usbg_f_net_set_dev_addr(nf, &dev); ret != C.USBG_SUCCESS {
+	if ret := C.usbg_min_net_set_dev_addr(nf, &dev); ret != C.USBG_SUCCESS {
 		return usbg_err(ret, "usbg_f_net_set_dev_addr")
 	}
-	if ret := C.usbg_f_net_set_host_addr(nf, &host); ret != C.USBG_SUCCESS {
+	if ret := C.usbg_min_net_set_host_addr(nf, &host); ret != C.USBG_SUCCESS {
 		return usbg_err(ret, "usbg_f_net_set_host_addr")
 	}
 	if qmult > 0 {
-		if ret := C.usbg_f_net_set_qmult(nf, C.uint(qmult)); ret != C.USBG_SUCCESS {
+		if ret := C.usbg_min_net_set_qmult(nf, C.uint(qmult)); ret != C.USBG_SUCCESS {
 			return usbg_err(ret, "usbg_f_net_set_qmult")
 		}
 	}
 
 	// ifname:libusbgx 视为只读(内核要求绑定前写成接口模式 "usb%d",
-	// 具体接口名由内核绑定时分配),直写 configfs —— 唯一保留的 sysfs 写。
+	// 具体接口名由内核绑定时分配),直写 configfs。
 	if err := write_attr(filepath.Join(this.config_fs, "functions", "rndis."+instance, "ifname"),
 		rndis_ifname_pattern(ifname)+"\n"); err != nil {
 		return err
@@ -205,16 +174,27 @@ func (this *Ctx) AddRndis(instance, dev_addr, host_addr, ifname string, qmult ui
 	return nil
 }
 
-// write_attr 直写 configfs 属性文件(libusbgx 覆盖不到处专用)。
-func write_attr(path, value string) error {
-	value_c := C.CString(value)
-	defer C.free(unsafe.Pointer(value_c))
-	path_c := C.CString(path)
-	defer C.free(unsafe.Pointer(path_c))
+// parse_mac 把 "02:12:34:56:78:9a" 解析进 C 结构 struct ether_addr。
+func parse_mac(mac string) (C.struct_ether_addr, error) {
+	var addr C.struct_ether_addr
 
-	if C.write_attr(path_c, value_c) != 0 {
-		// 常见原因:configfs 未挂载 / 权限 / 时序(link 后属性被锁定 EBUSY)
-		return fmt.Errorf("write %s: cannot write configfs attribute", path)
+	hw, err := net.ParseMAC(mac)
+	if err != nil || len(hw) != 6 {
+		return addr, fmt.Errorf("`%s` is not a valid MAC", mac)
+	}
+	for i, b := range hw {
+		addr.ether_addr_octet[i] = C.uchar(b)
+	}
+
+	return addr, nil
+}
+
+// write_attr 直写 configfs 属性文件(libusbgx 覆盖不到处专用:
+// rndis ifname 只读、config MaxPower 超 bMaxPower uint8 范围)。
+func write_attr(path, value string) error {
+	// 常见失败原因:configfs 未挂载 / 权限 / 时序(link 后属性被锁定 EBUSY)
+	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }

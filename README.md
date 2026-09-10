@@ -14,7 +14,7 @@
                                                         IPC:   unix socket(/tmp/<ident>.sock),cli ipc 子命令
 ```
 
-- 模式列表:`[RNDIS, ADB]`。**短按**前进到下一个模式,**长按**进入/退出子模式选择(选择中短按切换子模式),切换即应用。
+- 模式序列由 `--gadget` 指定(可重复,顺序 = 切换顺序),默认 `rndis` → `adb`;条目可写 `name.N` 指定初始 submode(如 `--gadget rndis.1` 启动即从模式)。**短按**前进到下一个模式,**长按**进入/退出子模式选择(选择中短按切换子模式),切换即应用。
 - 每次模式切换都会:清空现有函数 → 添加新模式函数 → 应用 → 更新 gadget。
 - RNDIS 模式下 daemon 自行管理网络:让 NetworkManager 放弃该接口、按子模式配置网络(RNDIS 子模式见下节)。
 - daemon 主循环与 IPC server 相互独立:IPC 异常会自动重建,不影响设备功能。
@@ -83,12 +83,12 @@ make cli-arm64                       # 交叉编译
 make DEBUG=1 cli-amd64               # 带调试信息(-gcflags=all=-N -l)
 ```
 
-libusbgx(submodule)由 Makefile 检测源文件变更后用 meson 自动构建,产物在 `build/libusbgx/<arch>/`;构建机需要 `meson`/`ninja`,arm64 交叉需要 `aarch64-linux-gnu-gcc/g++`。
+本仓库不携带 libusbgx 源码或二进制:声明按公开 ABI 自写于 `core/usb/gadget/usbg_min.h`,链接期符号由 `core/usb/gadget/libusbgx.symbols`(从设备 so 导出的函数名清单)生成的**空桩 so**(soname `libusbgx.so.2`)提供 —— 运行时由设备预装的 `libusbgx.so.2` 接管。arm64 交叉用 zig(`-target aarch64-linux-gnu.2.31`,设备 glibc 较老)。
 
 | 产物                    | 说明                                                                  |
 | :---------------------- | :-------------------------------------------------------------------- |
-| `build/amd64/cli`       | 本机编译(动态链接 libusbgx.so.2)                                      |
-| `build/arm64/cli`       | 交叉编译到设备架构(动态链接 libusbgx.so.2,设备预装或随 release 提供) |
+| `build/amd64/cli`       | 本机编译(动态依赖 libusbgx.so.2)                                      |
+| `build/arm64/cli`       | 交叉编译到设备架构(动态依赖 libusbgx.so.2,设备镜像预装)               |
 
 ## 部署
 
@@ -102,7 +102,7 @@ sudo apt install dnsmasq udhcpc iproute2
 - `udhcpc`:RNDIS 从模式的 DHCP 探测(`enableClientMode` 用它向 Windows ICS/上游要租约)
 - `iproute2`:`ip` 命令,配地址/路由的基础工具
 
-> `cli` 动态链接 `libusbgx.so.2`(configfs 操作库)。HandsomeMod 镜像预装(随 `gc` 附带);若缺失:`sudo apt install libusbgx`,或把 release 压缩包内的 `libusbgx.so.2.0.0` 安装到 `/usr/lib/` 并 `ldconfig`。
+> `cli` 动态依赖 `libusbgx.so.2`(configfs 操作库,本仓库不分发)。HandsomeMod 镜像预装;若缺失:`sudo apt install libusbgx`。
 
 ### 2. 安装二进制
 
@@ -147,7 +147,7 @@ sudo chmod +x /usr/local/lib/usb-switcher/start.sh
 ```
 
 > [!NOTE]
-> - 至少提供 **2** 个 LED:`--led` 的顺序即主模式顺序,初始化时依次点亮,第 1 个 LED = RNDIS 模式、第 2 个 = ADB 模式(详见[按键行为](#按键行为)与[LED 显示](#led-显示))
+> - LED 与 `--gadget` 按序对应:第 i 个 LED = 第 i 个 gadget 条目,初始化时依次点亮(详见[按键行为](#按键行为)与[LED 显示](#led-显示))
 > - `exec` 是必须的:daemon 不 fork,脚本必须以 `exec` 替换自身进程,systemd 才能直接管理 pid/信号
 
 ### 4. 创建 systemd 服务
@@ -222,6 +222,7 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--multiple-tap-threshold` | `500ms`                            | 连击阈值,< 0 禁用                                   |
 | `--auto-confirm-threshold` | `5s`                               | 预留,未使用                                         |
 | `-l, --led`                | —                                  | LED 节点,可重复,如 `-l /sys/class/leds/blue:wifi`   |
+| `--gadget`                 | `rndis` `adb`                      | gadget 序列,可重复,顺序 = 切换顺序;`name[.submode]`,如 `--gadget rndis.1 --gadget adb`(启动为 RNDIS 从模式,短按切 ADB);第 i 个 gadget 对应第 i 个 `--led` |
 | `--led-blink-duration`     | `100ms`                            | 模式切换快闪的亮时长                                |
 | `--led-blink-interval`     | `300ms`                            | 模式切换快闪的灭时长                                |
 | `--submode-led-duration`   | `750ms`                            | 进入/退出子模式选择时 LED 的关闭提示时长            |
@@ -304,7 +305,7 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 
 ## 技术细节
 
-- **configfs 操作走 libusbgx(cgo)**:函数/配置/属性/OS 描述符的创建与写入全部经 submodule `core/usb/gadget/libusbgx`(LGPL),不再 exec 外部 `gc` 二进制。libusbgx 的属性写在绑定前完成,不存在"link 后属性被锁定(EBUSY)"的时序问题。
+- **configfs 操作走 libusbgx(cgo)**:函数/配置/属性/OS 描述符的创建与写入经 cgo 调用 `libusbgx.so.2`(设备预装,仓库不分发其源码/二进制;仅自写 ABI 声明 `usbg_min.h` + 符号名清单),不再 exec 外部 `gc` 二进制。libusbgx 的属性写在绑定前完成,不存在"link 后属性被锁定(EBUSY)"的时序问题。
 - **ifname 属性必须写模式**:内核(≥5.12,`gether_set_ifname`)要求 ifname 写成接口模式(`usb%d`),写具体名字(`usb0`)会返回 `-EINVAL`。libusbgx 把 ifname 视为只读,程序在绑定前直写 configfs;绑定后内核按空闲号分配真实接口名,程序读回属性解析。
 - **configfs 不能创建文件**:写一个不存在的属性路径返回 EACCES,写入必须是 `exist_only` 语义(先 stat 再写)。
 - **NetworkManager 让位**:向 `/etc/NetworkManager/conf.d/<PROJECT_IDENT>.conf` 写持久 unmanaged 配置(NM 启动加载早于 usb0 出现,注册即 unmanaged),写入后 SIGHUP 重载并校验,失效时用 `nmcli device set ... managed no` 兜底;NM 接管时会把 usb0 当 DHCP client,永远拿不到地址还会清掉配置的 IP。
@@ -333,16 +334,15 @@ tests/virtual-button/   # 虚拟按键注入工具
 
 | 工具                    | 系统预装 | 简介                                                       | URL                               |
 | :---------------------- | :------: | :--------------------------------------------------------- | :-------------------------------- |
-| `libusbgx.so.2`         |    是    | configfs 操作库(运行时,submodule 引入;缺失可 `apt install libusbgx`) | https://github.com/libusbgx/libusbgx |
+| `libusbgx.so.2`         |    是    | configfs 操作库(设备预装;缺失可 `apt install libusbgx`)   | https://github.com/libusbgx/libusbgx |
 | `dnsmasq`               |    否    | RNDIS 接口的 DHCP 服务器(`apt install dnsmasq`)            |                                   |
 | `udhcpc`                |    否    | RNDIS 从模式的 DHCP 探测(`apt install udhcpc`)             |                                   |
 | `iproute2`              |    否    | `ip` 命令,配地址/路由(`apt install iproute2`)              |                                   |
 | `adbd`                  |    是    | ADB 模式下的 device 端守护进程                             |                                   |
-| `meson` / `ninja`       |    否    | 构建 libusbgx 时需要                                       |                                   |
 | `aarch64-linux-gnu-gcc` |    否    | 交叉编译 arm64 时需要                                      |                                   |
 
 ## License
 
 主要文件使用使用 [BSD 3-Clause](LICENSE)
 
-[`core/usb/gadget/libusbgx`](core/usb/gadget/libusbgx) 以 submodule 引入上游 [libusbgx](https://github.com/libusbgx/libusbgx)(LGPL-2.1-or-later), 许可证全文见 [core/usb/gadget/libusbgx/COPYING.LGPL](core/usb/gadget/libusbgx/COPYING.LGPL)
+程序运行时动态链接设备预装的 [libusbgx](https://github.com/libusbgx/libusbgx)(LGPL-2.1-or-later)**系统库**;本仓库不分发其源码或二进制,仅包含自写的 ABI 声明(`core/usb/gadget/usbg_min.h`)与函数名清单(`core/usb/gadget/libusbgx.symbols`),链接由本地生成的空桩完成

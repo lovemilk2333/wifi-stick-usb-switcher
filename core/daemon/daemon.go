@@ -34,6 +34,7 @@ type DaemonCmd struct {
 	LedBlinkInterval     time.Duration    `arg:"--led-blink-interval" help:"led blink interval, the dark duration of led when blinking" default:"300ms"`
 	SubmodeLedDuration   time.Duration    `arg:"--submode-led-duration" help:"led off duration when entering submode selection, before showing the submode state" default:"750ms"`
 	UsbConfigFs          string           `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
+	Gadgets              []string         `arg:"--gadget,separate" help:"gadget sequence, repeatable, order = switch order; name[.submode], e.g. --gadget rndis --gadget adb (default), --gadget rndis.1 for the client submode"`
 	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
 	RndisHostMac         net.HardwareAddr `arg:"--rndis-host-mac" default:"02:98:76:54:32:10" help:"the network interface mac address of the device which connected to rndis can see"`
 	RndisIP              string           `arg:"-a,--rndis-ip" default:"10.22.33.1/24" help:"the IP address of rndis network interface, you need provide a valid IP address and a prefix of network like 10.0.0.100/24"`
@@ -275,6 +276,24 @@ func (this *Daemon) run_ipc_server() {
 
 var LED_MODE_BLINK *led.LedMode
 
+// parse_gadget_spec 解析 `--gadget` 条目:`name` 或 `name.N`
+// (初始 submode,默认 0),如 `rndis` / `rndis.1` / `adb`。
+func parse_gadget_spec(spec string) (string, int, error) {
+	name, submode_str, has_submode := strings.Cut(spec, ".")
+	if name == "" {
+		return "", 0, fmt.Errorf("empty gadget name in `%s`", spec)
+	}
+	if !has_submode {
+		return name, 0, nil
+	}
+
+	submode, err := strconv.Atoi(submode_str)
+	if err != nil || submode < 0 {
+		return "", 0, fmt.Errorf("invalid submode in `%s`", spec)
+	}
+	return name, submode, nil
+}
+
 // init validates cmd and stores all initialised handles on the Daemon struct.
 func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- validate arguments ------------------------------------------------
@@ -382,9 +401,36 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	} else {
 		rndis_qmult = ""
 	}
-	this.modes = []usb.UsbGadgetFunction{
-		usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct),
-		usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv),
+
+	// 按 --gadget 名称序列构造模式(顺序 = 切换顺序,默认 rndis → adb);
+	// 每个条目可用 `name.N` 指定初始 submode(如 rndis.1),默认 0。
+	// 同名多条目允许(如 --gadget rndis.0 --gadget rndis.1 各成一个模式)。
+	gadgets := cmd.Gadgets
+	if len(gadgets) == 0 {
+		gadgets = []string{"rndis", "adb"}
+	}
+	this.modes = make([]usb.UsbGadgetFunction, 0, len(gadgets))
+	for _, spec := range gadgets {
+		name, submode, err := parse_gadget_spec(spec)
+		if err != nil {
+			return err
+		}
+
+		var mode usb.UsbGadgetFunction
+		switch name {
+		case "rndis":
+			mode = usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct)
+		case "adb":
+			mode = usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv)
+		default:
+			return fmt.Errorf("no such gadget type `%s` (available: rndis, adb)", name)
+		}
+
+		if submode > mode.MaxSubmode() {
+			return fmt.Errorf("gadget `%s` has no submode %d (max %d)", name, submode, mode.MaxSubmode())
+		}
+		mode.SetSubmode(submode)
+		this.modes = append(this.modes, mode)
 	}
 
 	// ---- initialise LEDs --------------------------------------------------
@@ -434,7 +480,7 @@ func (this *Daemon) apply_function() {
 				interpreter.SetMode(led.MODE_PRESET_OFF)
 			}
 		}
-		log.Printf("INFO: submode switched: mode %d submode %d\n", this.current_mode, this.modes[this.current_mode].GetSubmode())
+		log.Printf("INFO: submode switched: gadget %s submode %d\n", this.modes[this.current_mode].GetName(), this.modes[this.current_mode].GetSubmode())
 		this.mode_changing = false
 		return
 	}
@@ -477,7 +523,7 @@ func (this *Daemon) apply_function() {
 		}
 	}
 
-	log.Printf("INFO: mode switched: mode %d submode %d\n", this.current_mode, this.modes[this.current_mode].GetSubmode())
+	log.Printf("INFO: mode switched: gadget %s submode %d\n", this.modes[this.current_mode].GetName(), this.modes[this.current_mode].GetSubmode())
 	this.mode_changing = false
 }
 

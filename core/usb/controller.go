@@ -49,6 +49,9 @@ type UsbGadgetFunction interface {
 	// MaxSubmode 返回 submode 上界(支持 0~MaxSubmode),切换时取模,
 	// 防止 +1 无限增长撞上 enable() 只认识有限值
 	MaxSubmode() int
+	// GetName 返回 gadget 名称(如 `rndis`/`adb`),用于 --gadget 指定
+	// 与日志展示
+	GetName() string
 }
 
 type UsbGadgetFunctionBase struct {
@@ -74,6 +77,10 @@ func (this *UsbGadgetFunctionBase) MaxSubmode() int {
 }
 
 func (this *UsbGadgetFunctionBase) get_type() string {
+	return this._type
+}
+
+func (this *UsbGadgetFunctionBase) GetName() string {
 	return this._type
 }
 
