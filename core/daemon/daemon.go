@@ -72,6 +72,7 @@ type Daemon struct {
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
 	submode_changed  bool
+	reapply          bool        // 双击手动重新 effect:重建期间 LED 一律快闪
 	turn_off_leds    atomic.Bool // IPC goroutine 写、apply_function goroutine 读,需原子
 	tick_interval    time.Duration
 	daemonipc_config *ipc.ServerConfig
@@ -481,8 +482,11 @@ func (this *Daemon) apply_function() {
 		return
 	}
 
-	// effect 期间:模式切换用快闪,子模式切换(选择状态中短按)用关闭 LED
-	if this.submode_selection {
+	// effect 期间:模式切换/双击重刷用快闪,子模式切换(选择状态中短按)
+	// 用关闭 LED;reapply 此时消费掉(只在本次重建生效)
+	reapply := this.reapply
+	this.reapply = false
+	if this.submode_selection && !reapply {
 		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
@@ -593,7 +597,14 @@ func (this *Daemon) Tick() {
 				interpreter.SetMode(this.submode_entry_mode)
 			}
 		case input.INPUT_MULTIPLE_TAP:
-			// TODO
+			// 双击(连续快按):重新 effect 当前模式的 gadget —— 走完整
+			// 重建(CleanAll → Create → add/effect → 重绑 UDC),等同
+			// 重插,用于 USB 状态异常时手动恢复。reapply 让重建期间
+			// LED 快闪(即使正处在 submode 选择中,反馈也一致)
+			log.Printf("INFO: multiple tap x%d, re-apply gadget\n", event.TapCount)
+			this.reapply = true
+			this.mode_changed = true
+			this.submode_changed = false
 		case input.INPUT_ERROR:
 			// TODO WARNING
 		}

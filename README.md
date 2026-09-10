@@ -44,7 +44,7 @@ flowchart TD
 | 短按 tap          | 按下时间 < `--long-tap-threshold`(500ms)                     | 未在选择中:切换到下一个模式;子模式选择中:切换子模式                                                                                                                                                        |
 | 长按 long-tap     | 按下时间 ≥ `--long-tap-threshold`                            | 进入/退出子模式选择,LED 先关闭 `--submode-led-duration`(750ms) 提示                                                                                                                                        |
 | 长按关机          | 按住时间 ≥ `--shutdown-threshold`(5s,须 > 长按阈值,`0` 禁用) | 立即关机,不等松开:LED 反向逐颗亮起(最后至最前,各 500ms),随后执行 `--shutdown-command`。默认按键是 KEY_RESTART,松开事件会触发系统级重启,poweroff 必须在按住期间调用;触发后停止一切事件处理(INPUT Grab 保持) |
-| 连击 multiple-tap | `--multiple-tap-threshold`(500ms)内的连续 tap                | 预留(TODO)                                                                                                                                                                                                 |
+| 连击 multiple-tap | `--multiple-tap-threshold`(500ms)内的连续 tap(双击等)       | 重新 effect 当前模式的 gadget:完整重建并重绑 UDC(LED 快闪过渡),等同重插,用于 USB 状态异常时手动恢复                                                                                                        |
 
 - `--long-tap-immediately`(默认开启):按下时间一到阈值立即上报长按,无需等松开。
 - `--multiple-tap-threshold` 设为负数可禁用连击。
