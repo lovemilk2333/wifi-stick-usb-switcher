@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# 由 tests/qemu/prepare.sh 注入到测试用 rootfs 的 /etc/rc.local。
+#
+# 这里只负责把 9p 共享挂上、转交给共享里的 boot.sh —— 真正的装配逻辑放
+# 在仓库里,改 boot.sh 不需要重新 prepare 镜像。
+#
+# rootfs 自带 /etc/rc.local + 已 enable 的 rc-local.service(systemd 247 以
+# `Type=forking` 调 `/etc/rc.local start`),所以这是现成的启动钩子。
+
+mkdir -p /host
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=104857600 host /host 2>/dev/null
+
+if [ -f /host/tests/qemu/guest/boot.sh ]; then
+	# 用 sh 显式调用:9p 上文件的执行位不总是可靠
+	sh /host/tests/qemu/guest/boot.sh
+else
+	echo "qemu-harness: 9p 共享未挂上,请通过 tests/qemu/run.sh 启动" >&2
+fi
+
+exit 0

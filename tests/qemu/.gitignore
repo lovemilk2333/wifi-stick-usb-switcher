@@ -1,0 +1,8 @@
+# QEMU 测试环境的工作产物 —— 都能由 prepare.sh 重新生成,不进版本库
+#
+# .work/ 里是 1.1G 的 rootfs 副本;kernel/Image 是 wifi-stick-linux 的
+# Actions artifact;bin/ 是交叉编译出来的 guest 工具。
+
+/.work
+/bin
+/kernel/Image
