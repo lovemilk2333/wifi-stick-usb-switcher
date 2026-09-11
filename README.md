@@ -67,7 +67,7 @@ flowchart TD
 
 | 状态                   | 行为                                                          |
 | :--------------------- | :------------------------------------------------------------ |
-| 模式切换               | 快闪(`--led-blink-duration` on / `--led-blink-interval` off)  |
+| 模式切换               | 快闪(`--led-blink-duration` on / `--led-blink-interval` off);启动首轮不闪 |
 | 进入/退出子模式选择    | LED 先关闭 `--submode-led-duration` 提示,结束后显示子模式状态 |
 | 子模式切换(选择中短按) | LED 关闭                                                      |
 | 子模式状态             | 0 → 常亮;1 → 慢闪(500ms on / 500ms off)                       |

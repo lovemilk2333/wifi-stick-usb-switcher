@@ -73,8 +73,13 @@ type Daemon struct {
 	// submode 选择中的切换(submode_changed):函数不变,apply_function
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
-	submode_changed  bool
-	reapply          bool        // 双击手动重新 effect:重建期间 LED 一律快闪
+	submode_changed bool
+	reapply         bool // 双击手动重新 effect:重建期间 LED 一律快闪
+	first_apply     bool // 启动首轮应用:不动 LED,交给并行的 init 指示
+	// 启动窗口协调:init 指示(逐颗点亮)与 gadget 应用并行,两侧都以
+	// 原子标志等对方完成后再显示模式状态
+	apply_done       atomic.Bool
+	led_init_done    atomic.Bool
 	turn_off_leds    atomic.Bool // IPC goroutine 写、apply_function goroutine 读,需原子
 	tick_interval    time.Duration
 	daemonipc_config *ipc.ServerConfig
@@ -263,6 +268,7 @@ func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
 		gadget_req_chan: make(chan GadgetRequest, 4),
 	}
 	daemon.status.Store("initing")
+	daemon.first_apply = true
 
 	if err := daemon.init(cmd); err != nil {
 		return nil, err
@@ -349,29 +355,13 @@ func (this *Daemon) Mainloop() error {
 	// IPC server 由独立 goroutine 托管(挂了自动重建),不阻塞主循环
 	go this.run_ipc_server()
 
-	log.Printf("INFO daemon LED init\n")
-	for _, interpreter := range this.interpreters {
-		if interpreter == nil {
-			continue
-		}
-		interpreter.SetMode(led.MODE_PRESET_OFF)
-	}
-	this.update_interpreters()
-
-	for _, interpreter := range this.interpreters {
-		if interpreter == nil {
-			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
-		}
-		interpreter.SetMode(led.MODE_PRESET_ON)
-		this.update_interpreters()
-		time.Sleep(time.Millisecond * 500)
-		interpreter.SetMode(led.MODE_PRESET_OFF)
-	}
+	// USB 初始化与 LED init 指示并行:指示走完(约 500ms/LED)时
+	// gadget 通常已就绪,直接显示模式状态,不额外等待
+	go this.apply_function()
+	go this.led_init_indication()
 
 	ticker := time.NewTicker(this.tick_interval)
 	defer ticker.Stop()
-
-	go this.apply_function()
 
 	log.Printf("INFO daemon started\n")
 	for {
@@ -384,6 +374,46 @@ func (this *Daemon) Mainloop() error {
 			if this.shutting_down {
 				return nil // 关机流程(do_shutdown 同步执行)已完成,退出主循环
 			}
+		}
+	}
+}
+
+// led_init_indication 开机逐颗点亮指示(每颗 500ms),与应用 gadget 并行。
+// 结束后:应用已完成 → 显示模式状态;未完成 → 保持灭,由 finish_apply
+// 完成时补显示。
+func (this *Daemon) led_init_indication() {
+	log.Printf("INFO daemon LED init\n")
+
+	for _, interpreter := range this.interpreters {
+		if interpreter != nil {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
+	}
+
+	for _, interpreter := range this.interpreters {
+		if interpreter == nil {
+			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
+		}
+		interpreter.SetMode(led.MODE_PRESET_ON)
+		time.Sleep(time.Millisecond * 500)
+		interpreter.SetMode(led.MODE_PRESET_OFF)
+	}
+
+	this.led_init_done.Store(true)
+	if this.apply_done.Load() {
+		this.display_mode_state()
+	}
+}
+
+// display_mode_state 按 turn_off_leds/submode 显示当前模式 LED 状态。
+func (this *Daemon) display_mode_state() {
+	if !this.turn_off_leds.Load() {
+		if interpreter := this.current_interpreter(); interpreter != nil {
+			interpreter.SetMode(this.submode_led_mode())
+		}
+	} else {
+		if interpreter := this.current_interpreter(); interpreter != nil {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
 	}
 }
@@ -631,10 +661,16 @@ func (this *Daemon) apply_function() {
 	}
 
 	// effect 期间:模式切换/双击重刷用快闪,子模式切换(选择状态中短按)
-	// 用关闭 LED;reapply 此时消费掉(只在本次重建生效)
+	// 用关闭 LED;reapply/first_apply 此时消费掉(只在本次重建生效)。
+	// 启动首轮不闪:init 逐颗指示刚展示完,快闪("切换中")会把它接走
 	reapply := this.reapply
 	this.reapply = false
-	if this.submode_selection && !reapply {
+	first_apply := this.first_apply
+	this.first_apply = false
+	if first_apply {
+		// 启动首轮:LED 由并行的 init 指示占用,此处不碰;模式状态由
+		// led_init_done/apply_done 协调后显示
+	} else if this.submode_selection && !reapply {
 		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
@@ -679,15 +715,10 @@ func (this *Daemon) finish_apply() {
 		log.Printf("WARN: cannot enable gadget: %v\n", errs)
 	}
 
-	// 完成后按 submode 显示 LED:0 常亮 / 1 慢闪(submode % 2 取 index)
-	if !this.turn_off_leds.Load() {
-		if interpreter := this.current_interpreter(); interpreter != nil {
-			interpreter.SetMode(this.submode_led_mode())
-		}
-	} else {
-		if interpreter := this.current_interpreter(); interpreter != nil {
-			interpreter.SetMode(led.MODE_PRESET_OFF)
-		}
+	// 完成态:init 指示走完才显示(否则它会盖掉正在播放的点亮指示)
+	this.apply_done.Store(true)
+	if this.led_init_done.Load() {
+		this.display_mode_state()
 	}
 
 	log.Printf("INFO: mode switched: gadget %s submode %d\n", this.modes[this.current_mode].GetName(), this.modes[this.current_mode].GetSubmode())
