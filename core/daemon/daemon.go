@@ -53,6 +53,7 @@ type DaemonCmd struct {
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
 	IPCAllowOtherUser    bool             `arg:"--ipc-share,--ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
 	TickInterval         time.Duration    `arg:"--tick-rate,--tick-interval" default:"50ms" help:"daemon event loop tick interval"`
+	RebindDelay          time.Duration    `arg:"--rebind-delay" default:"500ms" help:"delay between gadget teardown and UDC rebind; lower is faster, raise it if the host fails to recognize the device"`
 	ShutdownThreshold    time.Duration    `arg:"--shutdown-threshold" default:"5s" help:"long-press shutdown threshold, must be greater than --long-tap-threshold; 0 disables"`
 	ShutdownCommand      string           `arg:"--shutdown-command" default:"poweroff" help:"command run when long-press shutdown triggers"`
 	ShutdownShell        string           `arg:"--shutdown-shell" default:"" help:"shell used to run --shutdown-command"`
@@ -107,6 +108,13 @@ type Daemon struct {
 	// gadget IPC 请求:IPC goroutine 投递、Tick(mainloop)消费执行 ——
 	// current_mode/submode 只由 mainloop 写,避免跨 goroutine 竞态
 	gadget_req_chan chan GadgetRequest
+
+	// rebind 等待:apply 阶段一(重建)完成后置位 pending_enable 与
+	// enable_deadline,由 Tick 计时到点启动阶段二(绑定 UDC),不占
+	// goroutine sleep
+	rebind_delay    time.Duration
+	pending_enable  bool
+	enable_deadline time.Time
 
 	// status 是 daemon 状态字符串(mainloop 写、IPC 读,原子):
 	// initing / running / effecting::gadget::mode|submode / shutting_down
@@ -515,6 +523,11 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	// ---- initialise USB gadget controller ---------------------------------
 
+	if cmd.RebindDelay < 0 {
+		return fmt.Errorf("`--rebind-delay` cannot be negative")
+	}
+	this.rebind_delay = cmd.RebindDelay
+
 	controller, err := usb.NewUsbGadgetController(cmd.UsbConfigFs)
 	if err != nil {
 		return fmt.Errorf("cannot init usb gadget: %w", err)
@@ -639,12 +652,31 @@ func (this *Daemon) apply_function() {
 		log.Printf("WARN: cannot add function: %v\n", err)
 	}
 
-	if errs := this.controller.Apply(); errs != nil {
+	// 阶段一:重建 gadget(拆旧 → 建骨架 → add/effect)
+	if errs := this.controller.ApplyFunctions(); errs != nil {
 		log.Printf("WARN: cannot apply functions: %v\n", errs)
+		this.mode_changing = false
+		return
 	}
 
-	if errs := this.controller.UpdateGadget(); errs != nil {
-		log.Printf("WARN: cannot update gadget: %v\n", errs)
+	// 拆旧与重绑之间的稳定等待交给 mainloop 计时:Tick 到点后启动
+	// finish_apply(阶段二),不在这里 sleep 占着 goroutine
+	this.enable_deadline = time.Now().Add(this.rebind_delay)
+	this.pending_enable = true
+}
+
+// finish_apply 阶段二(由 Tick 在 rebind 延时到点后启动):绑定 UDC、
+// 跑各函数运行时配置、显示完成态 LED,并释放 mode_changing。
+func (this *Daemon) finish_apply() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("WARN: finish_apply panic: %v", r)
+			this.mode_changing = false
+		}
+	}()
+
+	if errs := this.controller.Enable(); errs != nil {
+		log.Printf("WARN: cannot enable gadget: %v\n", errs)
 	}
 
 	// 完成后按 submode 显示 LED:0 常亮 / 1 慢闪(submode % 2 取 index)
@@ -684,6 +716,13 @@ func (this *Daemon) current_interpreter() *led.LedInterpreter {
 
 func (this *Daemon) Tick() {
 	this.update_status()
+
+	// rebind 等待到点(apply 阶段一之后的稳定期,由 mainloop 计时):
+	// 启动阶段二绑定 UDC
+	if this.pending_enable && !time.Now().Before(this.enable_deadline) {
+		this.pending_enable = false
+		go this.finish_apply()
+	}
 
 	// 长按关机检测,优先级高于一切事件处理:按住时长 >= shutdown_threshold
 	// 立即关机 —— 默认按键是 KEY_RESTART,松开事件会触发系统重启,

@@ -153,7 +153,7 @@ func (this *UsbGadgetRndis) enable(ctx *UsbGadgetFunctionContext) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("rndis interface `%s` not found after enable", ifname)
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	this.ifname = ifname // 让 dnsmasq pid 文件等后续逻辑用真实名字
 
@@ -461,7 +461,7 @@ func wait_rndis_carrier(ifname string, timeout time.Duration) {
 		if err == nil && strings.TrimSpace(string(data)) == "1" {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

@@ -245,6 +245,7 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                     |
 | `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)          |
 | `--tick-rate`              | `50ms`                             | daemon 事件循环 tick 间隔                           |
+| `--rebind-delay`           | `500ms`                            | 拆旧 gadget 与重绑 UDC 之间的延时(越小切换越快;主机识别异常时调大) |
 | `--shutdown-threshold`     | `5s`                               | 长按关机阈值,必须 > `--long-tap-threshold`,`0` 禁用 |
 | `--shutdown-command`       | `poweroff`                         | 长按关机时执行的命令                                |
 | `--shell`                  | `/bin/bash`                        | 执行关机命令的 shell,`$SHELL` 环境变量优先          |

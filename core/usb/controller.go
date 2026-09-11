@@ -2,6 +2,7 @@ package usb
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -159,7 +160,9 @@ func (this *UsbGadgetController) apply_functions() map[string]error {
 		function_errors["clean_all"] = err
 		return function_errors
 	}
-	time.Sleep(1 * time.Second)
+	// 拆解在本平台(ChipIdea)是异步的:轮询等 gadget 目录消失再重建,
+	// 通常几十毫秒;超时兜底继续(与原先固定 1s 的保守语义一致)
+	this.wait_gadget_removed(2 * time.Second)
 
 	if err := this.ctx.CreateGadget(); err != nil {
 		function_errors["create_gadget"] = err
@@ -249,11 +252,19 @@ func (this *UsbGadgetController) apply_functions() map[string]error {
 	}
 }
 
-func (this *UsbGadgetController) enable_gadget() error {
-	// 拆旧后给 USB 控制器/host 稳定时间(unbind = host 看到断开),立刻
-	// 重绑可能让 host 端口卡死"无法识别";mobian-usb-gadget 同样延时。
-	time.Sleep(1 * time.Second)
+// wait_gadget_removed 轮询等 gadget 目录被删除(拆解异步);超时告警继续。
+func (this *UsbGadgetController) wait_gadget_removed(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(this.config_fs); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	log.Printf("WARN: gadget dir %s still exists after %s, continue anyway\n", this.config_fs, timeout)
+}
 
+func (this *UsbGadgetController) enable_gadget() error {
 	udc, err := find_udc()
 	if err != nil {
 		return err
@@ -273,12 +284,14 @@ func find_udc() (string, error) {
 	return "", fmt.Errorf("no udc found in /sys/class/udc")
 }
 
-func (this *UsbGadgetController) Apply() map[string]error {
-	errors := this.apply_functions()
-	if errors != nil {
-		return errors
-	}
+// ApplyFunctions 重建 gadget(CleanAll → CreateGadget → add/effect),
+// 不含 UDC 绑定;拆旧与重绑之间的等待由调用方(mainloop)计时,见 Enable。
+func (this *UsbGadgetController) ApplyFunctions() map[string]error {
+	return this.apply_functions()
+}
 
+// Enable 绑定 UDC 并让各函数做运行时配置(网络等);须在 ApplyFunctions 之后调用。
+func (this *UsbGadgetController) Enable() map[string]error {
 	err := this.enable_gadget()
 	if err != nil {
 		return map[string]error{
