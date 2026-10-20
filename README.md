@@ -77,9 +77,8 @@ flowchart TD
 ## 构建
 
 ```bash
-./build.sh [--debug] [arm64|amd64]   # 等价 make cli-amd64 / make cli-arm64
 make cli-amd64                       # 本机编译
-make cli-arm64                       # 交叉编译
+make cli-arm64-5.15                       # 交叉编译
 make DEBUG=1 cli-amd64               # 带调试信息(-gcflags=all=-N -l)
 ```
 
@@ -88,7 +87,7 @@ make DEBUG=1 cli-amd64               # 带调试信息(-gcflags=all=-N -l)
 | 产物                    | 说明                                                                  |
 | :---------------------- | :-------------------------------------------------------------------- |
 | `build/amd64/cli`       | 本机编译(动态依赖 libusbgx.so.2)                                      |
-| `build/arm64/cli`       | 交叉编译到设备架构(动态依赖 libusbgx.so.2,设备镜像预装)               |
+| `build/arm64-5.15/cli`       | 交叉编译到设备架构(动态依赖 libusbgx.so.2,设备镜像预装)               |
 
 ## 部署
 
@@ -108,7 +107,7 @@ sudo apt install dnsmasq udhcpc iproute2
 
 方式 A:从 [GitHub Releases](https://aka.lovemilk.top/github/wifi-stick-usb-switcher/releases/latest) 下载对应架构的可执行文件(注意不要拿错 `amd64` 版本),解压得到 `cli`。
 
-方式 B:自行交叉编译,见上文[构建](#构建),产物在 `build/arm64/cli`。
+方式 B:自行交叉编译,见上文[构建](#构建),产物在 `build/arm64-5.15/cli`。
 
 安装为系统命令(下文以 `/usr/local/bin/usb-switcher` 为例):
 
@@ -348,7 +347,18 @@ tests/virtual-button/   # 虚拟按键注入工具
 | `udhcpc`                |    否    | RNDIS 从模式的 DHCP 探测(`apt install udhcpc`)             |                                   |
 | `iproute2`              |    否    | `ip` 命令,配地址/路由(`apt install iproute2`)              |                                   |
 | `adbd`                  |    是    | ADB 模式下的 device 端守护进程                             |                                   |
-| `aarch64-linux-gnu-gcc` |    否    | 交叉编译 arm64 时需要                                      |                                   |
+| Zig with aarch64-linux-gnu.2.31 for Linux 5.15 `aarch64-linux-gnu-gcc.2.31` |    否    | 交叉编译 arm64 时需要                                      |                                   |
+
+安装 Zig with aarch64-linux-gnu.2.31 for Linux 5.15
+```bash
+mkdir -p "$HOME/tools"
+curl -sL -o /tmp/zig.tar.xz \
+    https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+tar -C "$HOME/tools" -xf /tmp/zig.tar.xz
+mv "$HOME/tools/zig-x86_64-linux-0.14.1" "$HOME/tools/zig"
+```
+
+---
 
 ## License
 

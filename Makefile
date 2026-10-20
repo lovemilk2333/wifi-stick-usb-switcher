@@ -51,29 +51,29 @@ build/libusbgx/stub/amd64/libusbgx.so: $(STUB_SRC)
 	cc -fPIC -shared -Wl,-soname,libusbgx.so.2 -o $@ $(STUB_SRC)
 	ln -sf libusbgx.so $(dir $@)libusbgx.so.2
 
-build/libusbgx/stub/arm64/libusbgx.so: $(STUB_SRC)
+build/libusbgx/stub/arm64-5.15/libusbgx.so: $(STUB_SRC)
 	mkdir -p $(dir $@)
 	$(ZIG) cc -target $(ZIG_TARGET) -fPIC -shared -Wl,-soname,libusbgx.so.2 -o $@ $(STUB_SRC)
 	ln -sf libusbgx.so $(dir $@)libusbgx.so.2
 
 # ---- cli ------------------------------------------------------------------
 
-.PHONY: all cli-amd64 cli-arm64 clean
+.PHONY: all cli-amd64 cli-arm64-5.15 clean
 
-all: cli-amd64
+all: cli-amd64 cli-arm64-5.15
 
 cli-amd64: build/libusbgx/stub/amd64/libusbgx.so
 	mkdir -p build/amd64
 	CGO_ENABLED=1 CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/amd64) -lusbgx" \
 		go build "$(GO_BUILD_FLAGS)" -ldflags "$(BASE_LDFLAGS)" -o build/amd64/cli ./cmd/cli.go
 
-cli-arm64: build/libusbgx/stub/arm64/libusbgx.so
-	mkdir -p build/arm64
+cli-arm64-5.15: build/libusbgx/stub/arm64-5.15/libusbgx.so
+	mkdir -p build/arm64-5.15
 	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET)" \
-		CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/arm64) -lusbgx" \
+		CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/arm64-5.15) -lusbgx" \
 		go build "$(GO_BUILD_FLAGS)" \
 		-ldflags "$(BASE_LDFLAGS) -linkmode external" \
-		-o build/arm64/cli ./cmd/cli.go
+		-o build/arm64-5.15/cli ./cmd/cli.go
 
 clean:
 	rm -rf build

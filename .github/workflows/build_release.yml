@@ -28,7 +28,7 @@ jobs:
                   go-version-file: "go.mod"
                   cache: true
 
-            - name: Install Zig (arm64 cross to glibc 2.31)
+            - name: Install Zig (arm64 5.15 cross to glibc 2.31)
               run: |
                   mkdir -p "$HOME/tools"
                   curl -sL -o /tmp/zig.tar.xz \
@@ -37,15 +37,11 @@ jobs:
                   mv "$HOME/tools/zig-x86_64-linux-0.14.1" "$HOME/tools/zig"
                   "$HOME/tools/zig/zig" version
 
-            - name: Run Build Script
+            - name: Run Make
               run: |
-                  chmod +x ./build.sh
+                  echo "Building..."
 
-                  echo "Building amd64..."
-                  ./build.sh amd64
-
-                  echo "Building arm64..."
-                  ./build.sh arm64
+                  make all
 
             - name: Prepare Assets and Tag
               id: prep
@@ -53,9 +49,7 @@ jobs:
                   mkdir -p release_dist
 
                   tar -I zstd -cvf release_dist/cli-linux-amd64.tar.zst -C build/amd64 cli
-                  # arm64 cli 动态依赖 libusbgx.so.2:设备镜像已预装
-                  # (HandsomeMod 特制补丁版,不可替换/再分发),故不打进包
-                  tar -I zstd -cvf release_dist/cli-linux-arm64.tar.zst -C build/arm64 cli
+                  tar -I zstd -cvf release_dist/cli-linux-arm64.tar.zst -C build/arm64-5.15 cli
 
                   INPUT_TAG="${{ github.event.inputs.release_tag }}"
                   if [ -n "$INPUT_TAG" ]; then
