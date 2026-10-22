@@ -1,6 +1,6 @@
 module github.com/lovemilk2333/wifi-stick-usb-switcher
 
-go 1.26.4
+go 1.27.3
 
 require (
 	github.com/alexflint/go-arg v1.6.1
