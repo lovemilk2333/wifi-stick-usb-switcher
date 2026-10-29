@@ -248,6 +248,7 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--shutdown-threshold`     | `5s`                               | 长按关机阈值,必须 > `--long-tap-threshold`,`0` 禁用 |
 | `--shutdown-command`       | `poweroff`                         | 长按关机时执行的命令                                |
 | `--shell`                  | `/bin/bash`                        | 执行关机命令的 shell,`$SHELL` 环境变量优先          |
+| `--tls-asker [ADDR]`       | 关闭;开启默认 `127.0.0.1:50996`     | Caddy `on_demand` TLS 质询:仅当 `?domain=` 等于当前 RNDIS 网卡上的 IP 时返回 200,网卡未启动/不匹配返回 403 空页 |
 
 ### `cli ipc <command> [args]`
 

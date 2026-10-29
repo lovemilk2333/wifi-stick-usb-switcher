@@ -42,6 +42,11 @@ type UsbGadgetRndis struct {
 	UsbGadgetFunctionBase
 }
 
+// GetIfname 返回当前 RNDIS 接口名(绑定后可能被 resolve_ifname 更新)。
+func (this *UsbGadgetRndis) GetIfname() string {
+	return this.ifname
+}
+
 // dnsmasq_pid_file 返回本实例的 dnsmasq pid 文件路径 — 随接口名动态,
 // 接口名由 --rndis-ifname 配置(默认 usb0)。
 func (this *UsbGadgetRndis) dnsmasq_pid_file() string {

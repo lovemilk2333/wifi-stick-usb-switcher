@@ -58,6 +58,9 @@ type DaemonCmd struct {
 	ShutdownCommand      string           `arg:"--shutdown-command" default:"poweroff" help:"command run when long-press shutdown triggers"`
 	ShutdownShell        string           `arg:"--shutdown-shell" default:"" help:"shell used to run --shutdown-command"`
 	ShutdownTimeout      time.Duration    `arg:"--shutdown-timeout" default:"30s" help:"run --shutdown-command timeout"`
+	// TlsAsker enables the Caddy on_demand TLS ask endpoint. nil = disabled;
+	// empty (flag present, no value) = 127.0.0.1:50996; one value = that listen addr.
+	TlsAsker []string `arg:"--tls-asker" help:"enable TLS ask server (Caddy on_demand); optional listen addr, default 127.0.0.1:50996" placeholder:"[ADDR]"`
 }
 
 type Daemon struct {
@@ -127,6 +130,10 @@ type Daemon struct {
 	// effect_kind 是本次 effect 的维度(mode=重建 / submode=重配网络),
 	// 供 status 区分;具体 gadget 值用 `ipc gadget` 查
 	effect_kind string
+
+	// tls_asker 是可选的 Caddy on_demand TLS 质询服务(独立 goroutine);
+	// 仅在 --tls-asker 开启时非 nil
+	tls_asker *TlsAsker
 }
 
 // update_status 刷新状态字符串(mainloop 线程;effecting 由 apply_function
@@ -351,6 +358,10 @@ func (this *Daemon) apply_led_state() {
 func (this *Daemon) Mainloop() error {
 	// 退出清理 adbd/dnsmasq/functionfs,避免强杀残留污染下次启动
 	defer usb.CleanupRuntime()
+	if this.tls_asker != nil {
+		defer this.tls_asker.Stop()
+		this.tls_asker.Start()
+	}
 
 	// IPC server 由独立 goroutine 托管(挂了自动重建),不阻塞主循环
 	go this.run_ipc_server()
@@ -619,6 +630,15 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	this.daemonipc_config = &ipc.ServerConfig{
 		Encryption:        false,
 		UnmaskPermissions: cmd.IPCAllowOtherUser,
+	}
+
+	// ---- tls asker (optional Caddy on_demand endpoint) ----
+	listen, err := parse_tls_asker_listen(cmd.TlsAsker, os.Args)
+	if err != nil {
+		return err
+	}
+	if listen != "" {
+		this.tls_asker = NewTlsAsker(listen, this)
 	}
 
 	return nil
