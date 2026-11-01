@@ -151,23 +151,21 @@ sudo chmod +x /usr/local/lib/usb-switcher/start.sh
 
 ### 4. 创建 systemd 服务
 
-```path
-/etc/systemd/system/wifi-stick-usb-switcher.service
+启用 TLS HTTP 服务前,将用于签发叶证书的 CA 私钥和证书放入配置目录。私钥应仅允许 root 读取:
+
+```bash
+sudo install -d -m 0700 /etc/usb-switcher
+sudo install -m 0600 ca.key /etc/usb-switcher/ca.key
+sudo install -m 0644 ca.crt /etc/usb-switcher/ca.crt
 ```
 
-```ini
-[Unit]
-Description=wifi-stick-usb-switcher
+将仓库中的 [`wifi-stick-usb-switcher.service.example`](./wifi-stick-usb-switcher.service.example) 安装为 systemd unit:
 
-[Service]
-Type=simple
-ExecStart=/usr/local/lib/usb-switcher/start.sh
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo install -m 0644 wifi-stick-usb-switcher.service.example /etc/systemd/system/wifi-stick-usb-switcher.service
 ```
+
+示例 unit 默认启用 TLS 服务,并使用 `/etc/usb-swicher/ca.key` 与 `/etc/usb-swicher/ca.crt`;若不需要 TLS,从 `ExecStart` 移除 `--tls-service` 及其后续 TLS 参数。叶证书有效期由 `--tls-leaf-duration` 配置,默认 `26h`,不会超过 CA 证书剩余有效期。CA 私钥与证书必须匹配,且证书必须是有效 CA。
 
 重载并启用:
 
@@ -243,12 +241,27 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--adb-env`                | `TERM=xterm-256color`              | adbd 附加环境变量,可重复                            |
 | `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                     |
 | `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)          |
-| `--tick-rate`              | `50ms`                             | daemon 事件循环 tick 间隔                           |
+| `--tick-rate`              | `50ms`                             | event-driven 主循环的兜底轮询间隔(按键/关机/rebind 等均由事件唤醒;此值仅作安全网) |
 | `--rebind-delay`           | `500ms`                            | 拆旧 gadget 与重绑 UDC 之间的延时(越小切换越快;主机识别异常时调大) |
 | `--shutdown-threshold`     | `5s`                               | 长按关机阈值,必须 > `--long-tap-threshold`,`0` 禁用 |
 | `--shutdown-command`       | `poweroff`                         | 长按关机时执行的命令                                |
 | `--shell`                  | `/bin/bash`                        | 执行关机命令的 shell,`$SHELL` 环境变量优先          |
-| `--tls-asker [ADDR]`       | 关闭;开启默认 `127.0.0.1:50996`     | Caddy `on_demand` TLS 质询:仅当 `?domain=` 等于当前 RNDIS 网卡上的 IP 时返回 200,网卡未启动/不匹配返回 403 空页 |
+| `--tls-service [ADDR]`    | 关闭;开启默认 `127.0.0.1:50996`     | 启动 Caddy TLS HTTP 服务;`/ask?domain=IP` 校验 RNDIS IP,`/generate` 按 `server_name` 签发 PEM 证书链和私钥,并校验 `local_ip` |
+| `--tls-root-key`          | —                                  | TLS root CA 私钥 PEM;启用 `--tls-service` 时必填 |
+| `--tls-root-cert`         | —                                  | 与 root key 匹配的 CA 证书 PEM;启用 `--tls-service` 时必填 |
+| `--tls-algorithm`         | `ecdsa-p384`                       | 叶证书密钥算法:`ecdsa-p384`(默认)、`ecdsa-p256`、`ecdsa-p521`,或手动指定 `rsa4096` 及更大位数(1024 的倍数);X25519 密钥交换由 Caddy TLS 配置协商 |
+| `--tls-leaf-duration`    | `26h`                              | TLS 叶证书有效期,必须为正数;实际期限不会超过 CA 证书到期时间 |
+
+Caddy 可将 `get_certificate http` 指向 `http://127.0.0.1:50996/generate`，并将 `on_demand` 质询指向 `http://127.0.0.1:50996/ask`。`/generate` 使用 Caddy 提供的 `server_name` 作为叶证书 CN/SAN；若为空，则使用经 RNDIS 校验的 `local_ip` 作为 IP SAN。Caddy 配置请参考 [Caddyfile.example](./Caddyfile.example)
+
+> [!NOTE]
+> 对于 Chrome >= 134, 可以访问 `chrome://certificate-manager/` 管理 Chrome Level 的证书
+>
+> 要删除 Caddy 证书缓存, 可以使用
+> ```sh
+> sudo rm -rf /var/lib/caddy/.local/share/caddy/*
+> sudo systemctl restart caddy
+> ```
 
 ### `cli ipc <command> [args]`
 
@@ -289,7 +302,7 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 
 ## dnsmasq 自定义
 
-默认参数在 RNDIS 接口上启动 dnsmasq:DHCP 池从本机 IP 之后到子网广播地址之前,提供网关(DHCP option 3),`--port=0` 关闭 DNS(避免与系统 dnsmasq 冲突)。启动时带 `--conf-file=/dev/null`,**不加载系统 dnsmasq 配置**(否则 OpenWrt/出厂配置里的 DHCP 范围,如 192.168.68.x,会被合并进本实例)。
+默认参数在 RNDIS 接口上启动 dnsmasq:DHCP 池从本机 IP 之后到子网广播地址之前,提供网关(DHCP option 3),`--port=0` 关闭 DNS(避免与系统 dnsmasq 冲突)。启动时带 `--conf-file=/dev/null`,**不加载系统 dnsmasq 配置**(否则 OpenWrt/出厂配置里的 DHCP 范围,如 192.168.68.x,会被合并进本实例)。本实例的租约文件放在 `/tmp/dnsmasq-<接口名>.leases`,兼容 systemd unit 的只读系统目录限制。
 
 自定义参数通过 `--dnsmasq-arg` 传入,**注意必须使用 `=` 形式**(空格分隔的值以 `--` 开头会被 go-arg 当作新参数解析):
 

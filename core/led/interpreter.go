@@ -1,8 +1,10 @@
 package led
 
 import (
+	"context"
 	"log"
 	"math"
+	"sync"
 	"time"
 )
 
@@ -23,14 +25,17 @@ type LedInterpreter struct {
 	next_action_time    time.Time
 
 	loop_count int
+
+	lock        sync.Mutex
+	mode_cancel context.CancelFunc
+	running     bool
 }
 
 func bool2uint(b bool) int {
 	if b {
 		return 1
-	} else {
-		return 0
 	}
+	return 0
 }
 
 func (this *LedInterpreter) set_next_action_time(t time.Time) {
@@ -55,12 +60,10 @@ func (this *LedInterpreter) init_mode() error {
 func (this *LedInterpreter) act(now time.Time) error {
 	switch this.mode_actions_length {
 	case 0:
-		// return fmt.Errorf("empty mode.actions")
 		log.Printf("WARN: empty mode.actions of LedInterpreter %+v\n", this)
 		return nil
 	case 1:
 		if this.init {
-			// log.Printf("DEBUG: mode.actions contains only one action, skip to act%+v\n", this)
 			return nil
 		}
 	}
@@ -98,26 +101,30 @@ func (this *LedInterpreter) normalize_action_index() {
 }
 
 func (this *LedInterpreter) GetMode() *LedMode {
+	this.lock.Lock()
+	defer this.lock.Unlock()
 	return this.mode
 }
 
+// SetMode replaces the current mode and starts a fresh event loop for it.
 func (this *LedInterpreter) SetMode(mode *LedMode) {
+	this.lock.Lock()
+	if this.mode_cancel != nil {
+		this.mode_cancel()
+		this.mode_cancel = nil
+	}
 	actions_length := len(mode.actions)
-	// if actions_length == 0 {
-	// 	return fmt.Errorf("empty mode.actions")
-	// }
 
 	this.init = false
+	this.mode_action_index = 0
 	this.mode = mode
 	this.mode_actions_length = LedModeActionIndex(actions_length)
 	this.set_next_action_time(time.Time{}) // set to `0`
-	this.loop_count = -1                   // the loop `0` will be added when the first act and `mode_action_index` is `0`
-
-	// err := this.init_mode()
-	// if err != nil {
-	// 	log.Printf("WARN: cannot init LedMode when set: %s\n", err)
-	// 	return err
-	// }
+	this.loop_count = -1                   // loop 0 added on first act when index is 0
+	if this.running {
+		this.start_mode_loop_locked()
+	}
+	this.lock.Unlock()
 }
 
 /*
@@ -137,7 +144,12 @@ func (this *LedInterpreter) SkipAction(step ...int) LedModeActionIndex {
 	return this.mode_action_index
 }
 
+// Tick applies the current mode once (init or next due action). Prefer the
+// event-driven Start() loop; Tick remains for sync init / shutdown sequences.
 func (this *LedInterpreter) Tick() error {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+
 	if !this.init {
 		return this.init_mode()
 	}
@@ -146,11 +158,97 @@ func (this *LedInterpreter) Tick() error {
 }
 
 func (this *LedInterpreter) GetLoopCount() int {
+	this.lock.Lock()
+	defer this.lock.Unlock()
 	return this.loop_count
 }
 
 func (this *LedInterpreter) ResetLoopCount() {
+	this.lock.Lock()
+	defer this.lock.Unlock()
 	this.loop_count = 0
+}
+
+// Start launches the event-driven loop for the current mode.
+func (this *LedInterpreter) Start() {
+	this.lock.Lock()
+	if this.running {
+		this.lock.Unlock()
+		return
+	}
+	this.running = true
+	this.start_mode_loop_locked()
+	this.lock.Unlock()
+}
+
+// Stop ends the event-driven loop (idempotent).
+func (this *LedInterpreter) Stop() {
+	this.lock.Lock()
+	if !this.running {
+		this.lock.Unlock()
+		return
+	}
+	this.running = false
+	if this.mode_cancel != nil {
+		this.mode_cancel()
+		this.mode_cancel = nil
+	}
+	this.lock.Unlock()
+}
+
+func (this *LedInterpreter) start_mode_loop_locked() {
+	ctx, cancel := context.WithCancel(context.Background())
+	this.mode_cancel = cancel
+	go this.loop(ctx)
+}
+
+func (this *LedInterpreter) loop(ctx context.Context) {
+	for {
+		this.lock.Lock()
+		if !this.running || ctx.Err() != nil {
+			this.lock.Unlock()
+			return
+		}
+
+		now := time.Now()
+		var action *LedModeAction
+		if this.mode_actions_length > 0 {
+			this.normalize_action_index()
+			action = this.mode.actions[this.mode_action_index]
+		}
+		if !this.init {
+			if err := this.init_mode(); err != nil {
+				log.Printf("WARN: led init_mode: %v\n", err)
+			}
+		} else {
+			if err := this.act(now); err != nil {
+				log.Printf("WARN: led act: %v\n", err)
+			}
+		}
+		wait := time.Duration(0)
+		if action != nil && action.action == MODE_ACTION_WAIT {
+			wait = action.duration
+		}
+		static_mode := this.mode_actions_length == 0 ||
+			(this.mode_actions_length == 1 && action.action != MODE_ACTION_WAIT)
+		this.lock.Unlock()
+
+		if static_mode {
+			select {
+			case <-ctx.Done():
+				return
+			}
+			return
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func NewLedInterpreter(led *Led) *LedInterpreter {

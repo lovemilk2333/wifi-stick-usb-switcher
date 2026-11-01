@@ -1,0 +1,23 @@
+{
+	skip_install_trust
+	http_port 0
+	https_port 0
+	auto_https disable_redirects
+	# enable when using `issuer internal`
+	# on_demand_tls {
+	# 	ask "http://127.0.0.1:50996/ask"
+	# }
+}
+
+(internal_tls) {
+	tls {
+		get_certificate http "http://127.0.0.1:50996/generate"
+		# issuer internal
+		on_demand
+	}
+}
+
+:8000 {
+	import internal_tls
+	respond "TLS OK" 200
+}

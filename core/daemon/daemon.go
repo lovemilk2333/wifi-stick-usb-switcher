@@ -52,15 +52,19 @@ type DaemonCmd struct {
 	AdbEnv               []string         `arg:"--adb-env,separate" help:"extra environment variables (KEY=VALUE) passed to the adbd process, repeatable, e.g. --adb-env=TERM=xterm-256color; default TERM=xterm-256color"`
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
 	IPCAllowOtherUser    bool             `arg:"--ipc-share,--ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
-	TickInterval         time.Duration    `arg:"--tick-rate,--tick-interval" default:"50ms" help:"daemon event loop tick interval"`
+	TickInterval         time.Duration    `arg:"--tick-rate,--tick-interval" default:"50ms" help:"deprecated argv, keep this to avoid error when provides this"`
 	RebindDelay          time.Duration    `arg:"--rebind-delay" default:"500ms" help:"delay between gadget teardown and UDC rebind; lower is faster, raise it if the host fails to recognize the device"`
 	ShutdownThreshold    time.Duration    `arg:"--shutdown-threshold" default:"5s" help:"long-press shutdown threshold, must be greater than --long-tap-threshold; 0 disables"`
 	ShutdownCommand      string           `arg:"--shutdown-command" default:"poweroff" help:"command run when long-press shutdown triggers"`
 	ShutdownShell        string           `arg:"--shutdown-shell" default:"" help:"shell used to run --shutdown-command"`
 	ShutdownTimeout      time.Duration    `arg:"--shutdown-timeout" default:"30s" help:"run --shutdown-command timeout"`
-	// TlsAsker enables the Caddy on_demand TLS ask endpoint. nil = disabled;
-	// empty (flag present, no value) = 127.0.0.1:50996; one value = that listen addr.
-	TlsAsker []string `arg:"--tls-asker" help:"enable TLS ask server (Caddy on_demand); optional listen addr, default 127.0.0.1:50996" placeholder:"[ADDR]"`
+	// TlsService enables Caddy's on-demand ask and HTTP certificate endpoints.
+	// Empty (flag present, no value) selects the default listen address.
+	TlsService      []string      `arg:"--tls-service" help:"enable Caddy TLS service; optional listen addr, default 127.0.0.1:50996" placeholder:"[ADDR]"`
+	TlsRootKey      string        `arg:"--tls-root-key" help:"PEM private key for the TLS root CA"`
+	TlsRootCert     string        `arg:"--tls-root-cert" help:"PEM certificate for the TLS root CA"`
+	TlsAlgorithm    string        `arg:"--tls-algorithm" default:"ecdsa-p384" help:"TLS leaf key: ecdsa-p384 (default), ecdsa-p256, ecdsa-p521, or rsa<bits> (minimum 4096)"`
+	TlsLeafDuration time.Duration `arg:"--tls-leaf-duration" default:"26h" help:"TLS leaf certificate lifetime, such as 26h or 1d"`
 }
 
 type Daemon struct {
@@ -84,7 +88,6 @@ type Daemon struct {
 	apply_done       atomic.Bool
 	led_init_done    atomic.Bool
 	turn_off_leds    atomic.Bool // IPC goroutine 写、apply_function goroutine 读,需原子
-	tick_interval    time.Duration
 	daemonipc_config *ipc.ServerConfig
 
 	// submode selection state:长按进入选择模式后,短按切换 submode,
@@ -99,7 +102,7 @@ type Daemon struct {
 	submode_entry_done bool
 	submode_entry_mode *led.LedMode
 
-	// 长按关机状态(均由 mainloop 的 Tick 单 goroutine 读写,无需锁):
+	// 长按关机状态(由 mainloop 事件处理器读写):
 	// 按住时长 >= shutdown_threshold 后立即执行关机命令,不等松开 ——
 	// 默认按键是 KEY_RESTART,松开事件会触发系统级重启,poweroff
 	// 必须在按住期间调用,松开发生在关机过程中;
@@ -113,13 +116,14 @@ type Daemon struct {
 	// Stop()(SIGTERM/SIGINT)关闭,Mainloop select 退出并 defer 清理
 	stop_chan chan struct{}
 
-	// gadget IPC 请求:IPC goroutine 投递、Tick(mainloop)消费执行 ——
+	// gadget IPC 请求:IPC goroutine 投递、mainloop 事件处理器消费执行 ——
 	// current_mode/submode 只由 mainloop 写,避免跨 goroutine 竞态
 	gadget_req_chan chan GadgetRequest
+	// apply goroutine 用 deadline 消息请求 mainloop 安排 UDC 重绑。
+	rebind_chan chan time.Time
 
-	// rebind 等待:apply 阶段一(重建)完成后置位 pending_enable 与
-	// enable_deadline,由 Tick 计时到点启动阶段二(绑定 UDC),不占
-	// goroutine sleep
+	// rebind 等待 deadline 由 mainloop 所有;apply goroutine 只通过
+	// rebind_chan 投递阶段一完成时间。
 	rebind_delay    time.Duration
 	pending_enable  bool
 	enable_deadline time.Time
@@ -131,9 +135,11 @@ type Daemon struct {
 	// 供 status 区分;具体 gadget 值用 `ipc gadget` 查
 	effect_kind string
 
-	// tls_asker 是可选的 Caddy on_demand TLS 质询服务(独立 goroutine);
-	// 仅在 --tls-asker 开启时非 nil
-	tls_asker *TlsAsker
+	// tls_service 是可选的 Caddy on-demand TLS ask/certificate service。
+	tls_service *TlsService
+
+	// wake_chan 唤醒 event-driven mainloop,用于 IPC 请求。
+	wake_chan chan struct{}
 }
 
 // update_status 刷新状态字符串(mainloop 线程;effecting 由 apply_function
@@ -180,6 +186,7 @@ func (this *Daemon) RequestGadget(spec string) (string, error) {
 
 	select {
 	case this.gadget_req_chan <- req:
+		this.signal_wake()
 	case <-time.After(5 * time.Second):
 		return "", fmt.Errorf("gadget request not accepted (daemon busy)")
 	}
@@ -273,6 +280,8 @@ func NewDaemon(cmd *DaemonCmd) (*Daemon, error) {
 	daemon := &Daemon{
 		stop_chan:       make(chan struct{}),
 		gadget_req_chan: make(chan GadgetRequest, 4),
+		rebind_chan:     make(chan time.Time, 1),
+		wake_chan:       make(chan struct{}, 1),
 	}
 	daemon.status.Store("initing")
 	daemon.first_apply = true
@@ -288,8 +297,8 @@ func (this *Daemon) GetTurnOffLeds() bool {
 }
 
 // SimulateButton injects a synthetic button action, reusing the physical-button
-// path: tap/long push an event into the input queue (processed by Tick on the
-// mainloop, no shared-state race); shutdown simulates a held button long enough
+// path: tap/long push an event into the input queue (processed by the mainloop
+// event handler); shutdown simulates a held button long enough
 // for the mainloop's shutdown check to fire do_shutdown; multi injects `count`
 // taps that the input chain-merge turns into a single INPUT_MULTIPLE_TAP.
 func (this *Daemon) SimulateButton(target daemonipc.SimulateButtonTarget, count int) error {
@@ -341,27 +350,35 @@ func (this *Daemon) SetTurnOffLeds(off bool) {
 }
 
 // apply_led_state 按 turn_off_leds 立即设置当前 LED:关 / 显示 submode 状态。
-// 由 IPC handler(goroutine)调用,与 Tick/apply_function 的并发是既有模型。
+// 由 IPC handler(goroutine)调用;SetMode 会唤醒 LED 事件循环。
 func (this *Daemon) apply_led_state() {
 	if interpreter := this.current_interpreter(); interpreter != nil {
 		if this.turn_off_leds.Load() {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
-			interpreter.Tick()
 		} else {
 			interpreter.SetMode(this.submode_led_mode())
-			interpreter.Tick()
 		}
 	}
 }
 
-// Mainloop runs the daemon event loop at the configured tick rate.
+func (this *Daemon) signal_wake() {
+	select {
+	case this.wake_chan <- struct{}{}:
+	default:
+	}
+}
+
+// Mainloop waits for input/IPC events or the next active deadline.
 func (this *Daemon) Mainloop() error {
 	// 退出清理 adbd/dnsmasq/functionfs,避免强杀残留污染下次启动
 	defer usb.CleanupRuntime()
-	if this.tls_asker != nil {
-		defer this.tls_asker.Stop()
-		this.tls_asker.Start()
+	defer this.stop_led_interpreters()
+	if this.tls_service != nil {
+		defer this.tls_service.Stop()
+		this.tls_service.Start()
 	}
+
+	this.start_led_interpreters()
 
 	// IPC server 由独立 goroutine 托管(挂了自动重建),不阻塞主循环
 	go this.run_ipc_server()
@@ -371,20 +388,69 @@ func (this *Daemon) Mainloop() error {
 	go this.apply_function()
 	go this.led_init_indication()
 
-	ticker := time.NewTicker(this.tick_interval)
-	defer ticker.Stop()
+	var lazy_timer *time.Timer
+	var lazy_timer_ch <-chan time.Time
+	stop_lazy_timer := func() {
+		if lazy_timer != nil && !lazy_timer.Stop() {
+			select {
+			case <-lazy_timer.C:
+			default:
+			}
+		}
+		lazy_timer_ch = nil
+	}
+	defer stop_lazy_timer()
 
-	log.Printf("INFO daemon started\n")
+	arm_lazy_wait := func() {
+		var deadline time.Time
+		if this.pending_enable {
+			deadline = this.enable_deadline
+		}
+		if this.shutdown_threshold > 0 && !this.shutting_down {
+			if st := this.input_device.State(); st != nil {
+				shutdown_deadline := st.Time.Add(this.shutdown_threshold - st.Duration)
+				if deadline.IsZero() || shutdown_deadline.Before(deadline) {
+					deadline = shutdown_deadline
+				}
+			}
+		}
+		if deadline.IsZero() {
+			stop_lazy_timer()
+			return
+		}
+
+		d := time.Until(deadline)
+		if d < 0 {
+			d = 0
+		}
+		if lazy_timer == nil {
+			lazy_timer = time.NewTimer(d)
+		} else {
+			stop_lazy_timer()
+			lazy_timer.Reset(d)
+		}
+		lazy_timer_ch = lazy_timer.C
+	}
+
+	log.Printf("INFO daemon started (event-driven)\n")
 	for {
+		arm_lazy_wait()
+
 		select {
 		case <-this.stop_chan:
 			log.Printf("INFO daemon stopped\n")
 			return nil
-		case <-ticker.C:
-			this.Tick()
-			if this.shutting_down {
-				return nil // 关机流程(do_shutdown 同步执行)已完成,退出主循环
-			}
+		case <-this.input_device.Events():
+		case <-this.wake_chan:
+		case deadline := <-this.rebind_chan:
+			this.enable_deadline = deadline
+			this.pending_enable = true
+		case <-lazy_timer_ch:
+		}
+
+		this.handle_events()
+		if this.shutting_down {
+			return nil
 		}
 	}
 }
@@ -475,12 +541,6 @@ func parse_gadget_spec(spec string) (string, int, error) {
 // init validates cmd and stores all initialised handles on the Daemon struct.
 func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- validate arguments ------------------------------------------------
-	if cmd.TickInterval <= 0 {
-		return fmt.Errorf("tick interval must > 0")
-	}
-
-	this.tick_interval = cmd.TickInterval
-
 	if this.IsValidPath(cmd.Devnode, "/dev/input/", true, true) != base.PATH_STATUS_OK {
 		return fmt.Errorf("`%s` is not a valid input device", cmd.Devnode)
 	}
@@ -632,13 +692,26 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		UnmaskPermissions: cmd.IPCAllowOtherUser,
 	}
 
-	// ---- tls asker (optional Caddy on_demand endpoint) ----
-	listen, err := parse_tls_asker_listen(cmd.TlsAsker, os.Args)
+	// ---- TLS ask/certificate service (optional) ----------------------------
+	listen, err := parse_tls_service_listen(cmd.TlsService, os.Args)
 	if err != nil {
 		return err
 	}
+	if (cmd.TlsRootKey == "") != (cmd.TlsRootCert == "") {
+		return fmt.Errorf("--tls-root-key and --tls-root-cert must be provided together")
+	}
 	if listen != "" {
-		this.tls_asker = NewTlsAsker(listen, this)
+		if cmd.TlsRootKey == "" || cmd.TlsRootCert == "" {
+			return fmt.Errorf("--tls-service requires --tls-root-key and --tls-root-cert")
+		}
+		rootCertPEM, rootKeyPEM, err := read_tls_root(cmd.TlsRootCert, cmd.TlsRootKey)
+		if err != nil {
+			return err
+		}
+		this.tls_service, err = NewTlsService(listen, this, rootCertPEM, rootKeyPEM, cmd.TlsAlgorithm, cmd.TlsLeafDuration)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -715,13 +788,14 @@ func (this *Daemon) apply_function() {
 		return
 	}
 
-	// 拆旧与重绑之间的稳定等待交给 mainloop 计时:Tick 到点后启动
-	// finish_apply(阶段二),不在这里 sleep 占着 goroutine
-	this.enable_deadline = time.Now().Add(this.rebind_delay)
-	this.pending_enable = true
+	// 将稳定等待 deadline 投递给 mainloop,由它的 lazy timer 启动阶段二。
+	select {
+	case this.rebind_chan <- time.Now().Add(this.rebind_delay):
+	case <-this.stop_chan:
+	}
 }
 
-// finish_apply 阶段二(由 Tick 在 rebind 延时到点后启动):绑定 UDC、
+// finish_apply 阶段二(由 mainloop 在 rebind 延时到点后启动):绑定 UDC、
 // 跑各函数运行时配置、显示完成态 LED,并释放 mode_changing。
 func (this *Daemon) finish_apply() {
 	defer func() {
@@ -765,10 +839,10 @@ func (this *Daemon) current_interpreter() *led.LedInterpreter {
 	return this.interpreters[this.current_mode]
 }
 
-func (this *Daemon) Tick() {
+func (this *Daemon) handle_events() {
 	this.update_status()
 
-	// rebind 等待到点(apply 阶段一之后的稳定期,由 mainloop 计时):
+	// rebind 等待到点(apply 阶段一之后的稳定期,由 mainloop lazy timer 计时):
 	// 启动阶段二绑定 UDC
 	if this.pending_enable && !time.Now().Before(this.enable_deadline) {
 		this.pending_enable = false
@@ -785,14 +859,14 @@ func (this *Daemon) Tick() {
 	if this.shutdown_threshold > 0 {
 		if st := this.input_device.State(); st != nil && st.Duration >= this.shutdown_threshold {
 			this.shutting_down = true
-			this.update_status() // 立即反映 shutting_down(do_shutdown 之后不再有 tick)
+			this.update_status() // 立即反映 shutting_down(do_shutdown 之后主循环退出)
 			log.Printf("WARN: long-press shutdown triggered\n")
 			this.do_shutdown() // 同步执行:完成后 Mainloop 检测 shutting_down 退出进程
 			return
 		}
 	}
 
-	for _, event := range this.input_device.Tick() {
+	for _, event := range this.input_device.DrainEvents() {
 		log.Printf("%+v\n", event)
 
 		if event.Status != input.DEVICE_STATUS_NORMAL {
@@ -838,7 +912,7 @@ func (this *Daemon) Tick() {
 		}
 	}
 
-	// 消费 IPC 投递的 gadget 查询/切换请求(与本 tick 的按键事件同级生效)
+	// 消费 IPC 投递的 gadget 查询/切换请求(与按键事件同级生效)
 	this.handle_gadget_requests()
 
 	// 进入/退出子模式选择的 LED 关闭期结束后显示 submode 状态。
@@ -868,20 +942,33 @@ func (this *Daemon) Tick() {
 
 		go this.apply_function()
 	}
+}
 
+func (this *Daemon) start_led_interpreters() {
 	for _, interpreter := range this.interpreters {
 		if interpreter != nil {
-			interpreter.Tick()
+			interpreter.Start()
 		}
 	}
 }
 
-func (this *Daemon) update_interpreters() {
+func (this *Daemon) stop_led_interpreters() {
 	for _, interpreter := range this.interpreters {
-		if interpreter == nil {
-			continue
+		if interpreter != nil {
+			interpreter.Stop()
 		}
-		interpreter.Tick()
+	}
+}
+
+// wait_led_settled blocks until the LED event loop has applied the current
+// mode at least once (used by shutdown sequence instead of Tick polling).
+func (this *Daemon) wait_led_settled(interpreter *led.LedInterpreter, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if interpreter.GetLoopCount() >= 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -916,7 +1003,6 @@ func (this *Daemon) do_shutdown() {
 		}
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
-	this.update_interpreters()
 
 	interpreter_length := len(this.interpreters)
 	for i := interpreter_length - 1; i >= 0; i-- {
@@ -926,7 +1012,7 @@ func (this *Daemon) do_shutdown() {
 		}
 		last_interpreter = interpreter
 		interpreter.SetMode(led.MODE_PRESET_ON)
-		this.update_interpreters()
+		this.wait_led_settled(interpreter, 50*time.Millisecond)
 		time.Sleep(time.Millisecond * 500)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
 	}
@@ -935,7 +1021,7 @@ func (this *Daemon) do_shutdown() {
 
 	if last_interpreter != nil { // keep last Led on to show if system is powered off
 		last_interpreter.SetMode(led.MODE_PRESET_ON)
-		this.update_interpreters()
+		this.wait_led_settled(last_interpreter, 50*time.Millisecond)
 	}
 
 	// waiting for shutdown
@@ -960,12 +1046,10 @@ func load_led_interpreters(ledDevnodes []string) []*led.LedInterpreter {
 		}
 		interpreter := led.NewLedInterpreter(ledDevice)
 		interpreter.SetMode(led.MODE_PRESET_OFF)
-		err = interpreter.Tick()
-		if err != nil {
+		if err := interpreter.Tick(); err != nil {
 			log.Printf("WARN: cannot init LedInterpreter for node `%s`: %s\n", ledDevnode, err)
 			continue
 		}
-		interpreter.Tick() // Tick 无返回值,只刷新状态(SetMode 内部已 act 一次)
 
 		interpreters[index] = interpreter
 	}

@@ -53,6 +53,12 @@ func (this *UsbGadgetRndis) dnsmasq_pid_file() string {
 	return "/tmp/dnsmasq-" + this.ifname + ".pid"
 }
 
+// dnsmasq_lease_file keeps DHCP lease state in the daemon's writable runtime
+// directory, which also works under systemd ProtectSystem=strict.
+func (this *UsbGadgetRndis) dnsmasq_lease_file() string {
+	return "/tmp/dnsmasq-" + this.ifname + ".leases"
+}
+
 // add 经 libusbgx 创建 rndis 函数并 link 进 config
 // (gadget.Ctx.AddRndis:create_function → MAC/qmult(usbg_f_net_*)→
 // ifname 直写(只读 attr)→ add_config_function)。顺序由 libusbgx 保证:
@@ -692,8 +698,9 @@ func (this *UsbGadgetRndis) start_dnsmasq() {
 	// 参数顺序:服务默认值 → 用户自定义(--dnsmasq-arg)→ 控制参数。
 	// dnsmasq 对标量选项(如 --port)取最后一次出现,所以用户参数放在
 	// 默认值之后可以覆盖它们(--port=53 开启 DNS);--interface /
-	// --bind-interfaces / --pid-file 是控制参数,必须最后,保证接口归属
-	// 和 stop_dnsmasq_all 的 pid 文件追踪不被破坏。
+	// --bind-interfaces / --pid-file / --dhcp-leasefile 是控制参数,必须
+	// 最后,保证接口归属、pid 追踪和 lease 文件位置不被覆盖。lease 放在
+	// /tmp,以兼容 systemd ProtectSystem=strict。
 	// 注意 --no-resolv / --no-hosts 无法被参数覆盖(--hosts 没有正向
 	// 开关);想提供 hosts 请用 --addn-hosts=...(--no-hosts 只跳过
 	// /etc/hosts,addn-hosts 文件仍然加载)。
@@ -713,6 +720,7 @@ func (this *UsbGadgetRndis) start_dnsmasq() {
 		"--interface="+this.ifname,
 		"--bind-interfaces",
 		"--pid-file="+pidFile,
+		"--dhcp-leasefile="+this.dnsmasq_lease_file(),
 	)
 	if out, err := exec.Command("dnsmasq", args...).CombinedOutput(); err != nil {
 		log.Printf("WARN: cannot start dnsmasq: %v, output: %s\n", err, string(out))

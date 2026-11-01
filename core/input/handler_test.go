@@ -17,13 +17,13 @@ func TestInjectEvent(t *testing.T) {
 	dev := new_test_device()
 
 	dev.InjectEvent(&InputEvent{Type: INPUT_TAP, Status: DEVICE_STATUS_NORMAL})
-	events := dev.Tick()
+	events := dev.DrainEvents()
 	if len(events) != 1 || events[0].Type != INPUT_TAP {
 		t.Fatalf("unexpected events %+v", events)
 	}
 
 	dev.InjectEvent(&InputEvent{Type: INPUT_LONG_TAP, Status: DEVICE_STATUS_NORMAL})
-	events = dev.Tick()
+	events = dev.DrainEvents()
 	if len(events) != 1 || events[0].Type != INPUT_LONG_TAP {
 		t.Fatalf("unexpected events %+v", events)
 	}
@@ -61,7 +61,7 @@ func TestInjectMultiTap(t *testing.T) {
 		dev.InjectEvent(&InputEvent{Type: INPUT_TAP, Time: now, TapCount: 1, Status: DEVICE_STATUS_NORMAL})
 	}
 
-	events := dev.Tick()
+	events := dev.DrainEvents()
 	if len(events) != 1 {
 		t.Fatalf("expected 1 merged event, got %d: %+v", len(events), events)
 	}
@@ -70,5 +70,42 @@ func TestInjectMultiTap(t *testing.T) {
 	}
 	if events[0].TapCount != 3 {
 		t.Fatalf("expected TapCount 3, got %d", events[0].TapCount)
+	}
+}
+
+func TestDeferredTapChainFlushesAfterWindow(t *testing.T) {
+	dev := &InputDevice{
+		Config: &InputDeviceConfig{
+			MultipleTapThreshold: 20 * time.Millisecond,
+			MultipleTapMaxCount:  5,
+			LongTapThreshold:     300 * time.Millisecond,
+		},
+		event_queue: list.New(),
+		wake:        make(chan struct{}, 1),
+	}
+
+	dev.InjectEvent(&InputEvent{
+		Type:   INPUT_TAP,
+		Time:   time.Now(),
+		Status: DEVICE_STATUS_NORMAL,
+	})
+	if events := dev.DrainEvents(); len(events) != 0 {
+		t.Fatalf("tap should remain deferred during multi-tap window: %+v", events)
+	}
+
+	select {
+	case <-dev.Events(): // injection notification
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("missing injected-event notification")
+	}
+	select {
+	case <-dev.Events(): // deferred tap-chain timer notification
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("missing deferred tap-chain notification")
+	}
+
+	events := dev.DrainEvents()
+	if len(events) != 1 || events[0].Type != INPUT_TAP {
+		t.Fatalf("expected deferred single tap after window, got %+v", events)
 	}
 }

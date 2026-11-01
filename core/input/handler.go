@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -66,7 +67,16 @@ type InputDevice struct {
 	lock        sync.Mutex
 	event_queue *list.List
 
-	running bool
+	running atomic.Bool
+
+	// wake is a non-blocking signal that queued input events may be ready.
+	// The daemon blocks on Events() and drains the queue only after a signal.
+	wake chan struct{}
+
+	// long_tap_timer fires LongTapImmediately without polling after KEY DOWN.
+	long_tap_timer *time.Timer
+	// multi_tap_timer wakes the consumer when a deferred tap-chain should flush.
+	multi_tap_timer *time.Timer
 
 	base.PathChecker
 }
@@ -98,7 +108,10 @@ func (this *InputDevice) Open() (InputDeviceExitStatus, error) {
 	}
 
 	this.device = device
-	this.running = true
+	this.running.Store(true)
+	if this.wake == nil {
+		this.wake = make(chan struct{}, 1)
+	}
 
 	return DEVICE_STATUS_NORMAL, nil
 }
@@ -108,15 +121,90 @@ func (this *InputDevice) Close() (InputDeviceExitStatus, error) {
 		return DEVICE_ERROR_NIL_DEVICE, fmt.Errorf("device is nil")
 	}
 
+	this.lock.Lock()
+	this.stop_long_tap_timer_locked()
+	this.stop_multi_tap_timer_locked()
+	this.lock.Unlock()
+
 	err := this.device.Release()
 	if err != nil {
 		return DEVICE_ERROR_RELEASE, err
 	}
 
 	this.device = nil
-	this.running = false
+	this.running.Store(false)
 
 	return DEVICE_STATUS_NORMAL, nil
+}
+
+// Events returns the wake channel; readable when new events are queued.
+func (this *InputDevice) Events() <-chan struct{} {
+	return this.wake
+}
+
+func (this *InputDevice) signal_wake() {
+	if this.wake == nil {
+		return
+	}
+	select {
+	case this.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (this *InputDevice) stop_long_tap_timer_locked() {
+	if this.long_tap_timer != nil {
+		this.long_tap_timer.Stop()
+		this.long_tap_timer = nil
+	}
+}
+
+func (this *InputDevice) stop_multi_tap_timer_locked() {
+	if this.multi_tap_timer != nil {
+		this.multi_tap_timer.Stop()
+		this.multi_tap_timer = nil
+	}
+}
+
+func (this *InputDevice) arm_multi_tap_timer_locked(d time.Duration) {
+	this.stop_multi_tap_timer_locked()
+	if d <= 0 {
+		this.signal_wake()
+		return
+	}
+	this.multi_tap_timer = time.AfterFunc(d, func() {
+		this.signal_wake()
+	})
+}
+
+func (this *InputDevice) arm_long_tap_timer_locked() {
+	this.stop_long_tap_timer_locked()
+	if !this.Config.LongTapImmediately || this.Config.LongTapThreshold <= 0 {
+		return
+	}
+	threshold := this.Config.LongTapThreshold
+	this.long_tap_timer = time.AfterFunc(threshold, func() {
+		this.lock.Lock()
+		defer this.lock.Unlock()
+		if !this.pressed || this.long_tap_reported {
+			return
+		}
+		now := time.Now()
+		duration := now.Sub(this.press_start)
+		if duration < threshold {
+			return
+		}
+		this.long_tap_reported = true
+		this.event_queue.PushBack(&InputEvent{
+			Devnode:  this.devnode,
+			Type:     INPUT_LONG_TAP,
+			Time:     now,
+			TapCount: 1,
+			Status:   DEVICE_STATUS_NORMAL,
+			Duration: duration,
+		})
+		this.signal_wake()
+	})
 }
 
 func (this *InputDevice) StartDaemon() {
@@ -124,17 +212,20 @@ func (this *InputDevice) StartDaemon() {
 }
 
 func (this *InputDevice) daemon() {
-	for this.running {
+	device := this.device
+	for this.running.Load() {
 
-		if this.device == nil {
-			continue
+		if device == nil {
+			return
 		}
 
-		events, err := this.device.Read()
+		events, err := device.Read()
 		if err != nil {
 			if errors.Is(err, syscall.ENODEV) {
 				return
 			}
+			// Avoid a hot loop if the device reports a persistent read error.
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
@@ -155,7 +246,9 @@ func (this *InputDevice) daemon() {
 				this.pressed = true
 				this.press_start = event_time
 				this.long_tap_reported = false
+				this.arm_long_tap_timer_locked()
 				this.lock.Unlock()
+				this.signal_wake() // wake daemon for shutdown-timer arming
 			case 0: // KEY UP
 				if !this.pressed {
 					continue
@@ -164,6 +257,8 @@ func (this *InputDevice) daemon() {
 				// 整个状态处理在锁内:IsZero 兜底会写 press_start,
 				// 与 State() 的锁内读竞争,不能留在锁外
 				this.lock.Lock()
+
+				this.stop_long_tap_timer_locked()
 
 				if this.press_start.IsZero() {
 					this.press_start = event_time
@@ -175,6 +270,7 @@ func (this *InputDevice) daemon() {
 					this.long_tap_reported = false
 					this.reset_press()
 					this.lock.Unlock()
+					this.signal_wake()
 					continue
 				}
 
@@ -194,26 +290,7 @@ func (this *InputDevice) daemon() {
 				this.reset_press()
 				this.event_queue.PushBack(e)
 				this.lock.Unlock()
-			}
-		}
-
-		if this.Config.LongTapImmediately && this.pressed && !this.long_tap_reported {
-			now := time.Now()
-			duration := now.Sub(this.press_start)
-			if duration >= this.Config.LongTapThreshold {
-				this.lock.Lock()
-				// 不 reset_press:保持 pressed=true 让 State() 继续反映按住状态
-				// (daemon 长按关机依赖),long_tap_reported 防重复上报
-				this.long_tap_reported = true
-				this.event_queue.PushBack(&InputEvent{
-					Devnode:  this.devnode,
-					Type:     INPUT_LONG_TAP,
-					Time:     now,
-					TapCount: 1,
-					Status:   DEVICE_STATUS_NORMAL,
-					Duration: duration,
-				})
-				this.lock.Unlock()
+				this.signal_wake()
 			}
 		}
 	}
@@ -265,8 +342,9 @@ func (this *InputDevice) InjectEvent(event *InputEvent) {
 		return
 	}
 	this.lock.Lock()
-	defer this.lock.Unlock()
 	this.event_queue.PushBack(event)
+	this.lock.Unlock()
+	this.signal_wake()
 }
 
 // InjectPress simulates a held button (KEY DOWN) for `duration`, so State()
@@ -275,13 +353,16 @@ func (this *InputDevice) InjectEvent(event *InputEvent) {
 // "shutdown" simulation.
 func (this *InputDevice) InjectPress(duration time.Duration) {
 	this.lock.Lock()
-	defer this.lock.Unlock()
 	this.pressed = true
 	this.press_start = time.Now().Add(-duration)
 	this.long_tap_reported = true
+	this.lock.Unlock()
+	this.signal_wake()
 }
 
-func (this *InputDevice) Tick() []*InputEvent {
+// DrainEvents returns queued events and flushes a deferred tap-chain after its window.
+// Call it after Events signals; it does not poll or wait for future events.
+func (this *InputDevice) DrainEvents() []*InputEvent {
 	this.lock.Lock()
 	defer this.lock.Unlock()
 
@@ -325,6 +406,8 @@ func (this *InputDevice) Tick() []*InputEvent {
 		chain = append(chain, event)
 	}
 
+	this.stop_multi_tap_timer_locked()
+
 	if len(chain) > 0 { // 将未形成 chain 的事件放回队列
 		last := chain[len(chain)-1]
 
@@ -334,6 +417,9 @@ func (this *InputDevice) Tick() []*InputEvent {
 			for _, event := range chain {
 				this.event_queue.PushBack(event)
 			}
+			// Wake the consumer when the multi-tap window expires.
+			remain := this.Config.MultipleTapThreshold - now.Sub(last.Time)
+			this.arm_multi_tap_timer_locked(remain)
 		}
 	}
 
@@ -376,6 +462,7 @@ func NewDevice(devnode string, config *InputDeviceConfig) (*InputDevice, error) 
 		devnode:     devnode,
 		Config:      config,
 		event_queue: list.New(),
+		wake:        make(chan struct{}, 1),
 	}
 
 	err := device.check()
