@@ -59,7 +59,8 @@ func TestTlsServiceEndpointsAndCertificateSNI(t *testing.T) {
 	rootCertPEM, rootKeyPEM := test_tls_root(t)
 	rndis := usb.NewUsbGadgetRndis(netip.MustParsePrefix("127.0.0.1/8"), "", "", "", "lo", "", nil, netip.Addr{}, time.Second, time.Second, "", "", "")
 	daemon := &Daemon{modes: []usb.UsbGadgetFunction{rndis}}
-	service, err := NewTlsService("127.0.0.1:0", daemon, rootCertPEM, rootKeyPEM, "ecdsa-p256")
+	daemon.current_mode_rndis.Store(true)
+	service, err := NewTlsService("127.0.0.1:0", daemon, rootCertPEM, rootKeyPEM, "ecdsa-p256", nil)
 	if err != nil {
 		t.Fatalf("NewTlsService: %v", err)
 	}
@@ -145,7 +146,7 @@ func TestTlsServiceEndpointsAndCertificateSNI(t *testing.T) {
 func TestTlsLeafDuration(t *testing.T) {
 	rootCertPEM, rootKeyPEM := test_tls_root(t)
 	rndis := usb.NewUsbGadgetRndis(netip.MustParsePrefix("127.0.0.1/8"), "", "", "", "lo", "", nil, netip.Addr{}, time.Second, time.Second, "", "", "")
-	service, err := NewTlsService("", &Daemon{modes: []usb.UsbGadgetFunction{rndis}}, rootCertPEM, rootKeyPEM, "ecdsa-p256", 2*time.Hour)
+	service, err := NewTlsService("", &Daemon{modes: []usb.UsbGadgetFunction{rndis}}, rootCertPEM, rootKeyPEM, "ecdsa-p256", nil, 2*time.Hour)
 	if err != nil {
 		t.Fatalf("NewTlsService with custom leaf duration: %v", err)
 	}
@@ -162,20 +163,149 @@ func TestTlsLeafDuration(t *testing.T) {
 	if remaining < 2*time.Hour-time.Minute || remaining > 2*time.Hour {
 		t.Fatalf("custom leaf duration = %s, want approximately 2h", remaining)
 	}
-	if _, err := NewTlsService("", &Daemon{}, rootCertPEM, rootKeyPEM, "ecdsa-p256", 0); err == nil {
+	if _, err := NewTlsService("", &Daemon{}, rootCertPEM, rootKeyPEM, "ecdsa-p256", nil, 0); err == nil {
 		t.Fatal("expected zero leaf duration to be rejected")
 	}
 }
 
 func TestTlsServiceDefaultsToECDSAP384(t *testing.T) {
 	rootCertPEM, rootKeyPEM := test_tls_root(t)
-	service, err := NewTlsService("", &Daemon{}, rootCertPEM, rootKeyPEM, "")
+	service, err := NewTlsService("", &Daemon{}, rootCertPEM, rootKeyPEM, "", nil)
 	if err != nil {
 		t.Fatalf("NewTlsService with default algorithm: %v", err)
 	}
 	if service.algorithm != "ecdsa-p384" {
 		t.Fatalf("default TLS leaf algorithm = %q, want ecdsa-p384", service.algorithm)
 	}
+}
+
+func TestTlsAllowRules(t *testing.T) {
+	rules, err := parse_tls_allow([]string{
+		"10.22.33.0/24",
+		"+.a.com",
+		"*.b.com",
+		"?.c.com",
+	})
+	if err != nil {
+		t.Fatalf("parse allow rules: %v", err)
+	}
+	service := &TlsService{tls_allow: rules}
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"10.22.33.5", true},
+		{"10.22.34.5", false},
+		{"a.com", false},
+		{"x.a.com", true},
+		{"x.y.a.com", true},
+		{"b.com", true},
+		{"x.b.com", true},
+		{"x.y.b.com", true},
+		{"c.com", false},
+		{"x.c.com", true},
+		{"xy.c.com", false},
+		{"x.y.c.com", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := service.tls_name_allowed(tc.name); got != tc.want {
+				t.Fatalf("tls_name_allowed(%q) = %t, want %t", tc.name, got, tc.want)
+			}
+		})
+	}
+	for _, invalid := range [][]string{{"10.22.33.1"}, {"*.a.*.com"}, {"?.a.com.extra?"}, {""}} {
+		if _, err := parse_tls_allow(invalid); err == nil {
+			t.Errorf("parse_tls_allow(%q) expected error", invalid)
+		}
+	}
+}
+
+func TestTlsAllowRulesApplyToEndpoints(t *testing.T) {
+	rootCertPEM, rootKeyPEM := test_tls_root(t)
+	rndis := usb.NewUsbGadgetRndis(netip.MustParsePrefix("127.0.0.1/8"), "", "", "", "lo", "", nil, netip.Addr{}, time.Second, time.Second, "", "", "")
+	daemon := &Daemon{modes: []usb.UsbGadgetFunction{rndis}}
+	daemon.current_mode_rndis.Store(true)
+	service, err := NewTlsService("", daemon, rootCertPEM, rootKeyPEM, "ecdsa-p256", []string{"10.0.0.0/24", "*.allowed.test"})
+	if err != nil {
+		t.Fatalf("NewTlsService: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		want int
+	}{
+		{"allowed.test", http.StatusOK},
+		{"sub.allowed.test", http.StatusOK},
+		{"blocked.test", http.StatusForbidden},
+	} {
+		t.Run("ask/"+tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/ask?domain="+tc.name, nil)
+			service.handle_ask(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("ask status = %d, want %d", rr.Code, tc.want)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		want int
+	}{
+		{"sub.allowed.test", http.StatusOK},
+		{"blocked.test", http.StatusForbidden},
+	} {
+		t.Run("generate/"+tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/generate?server_name="+tc.name+"&signature_schemes=0403&local_ip=127.0.0.1", nil)
+			service.handle_generate(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("generate status = %d, want %d: %s", rr.Code, tc.want, rr.Body.String())
+			}
+		})
+	}
+
+	t.Run("generate uses SNI before local IP", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/generate?server_name=sub.allowed.test&signature_schemes=0403&local_ip=192.0.2.10", nil)
+		service.handle_generate(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("SNI match should allow certificate even when local_ip is outside allowlist: got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("generate falls back to local IP when SNI is empty", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/generate?server_name=&signature_schemes=0403&local_ip=10.0.0.10", nil)
+		service.handle_generate(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("local_ip match should allow certificate when SNI is empty: got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("generate rejects when SNI does not match even if local IP does", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/generate?server_name=blocked.test&signature_schemes=0403&local_ip=10.0.0.10", nil)
+		service.handle_generate(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 when non-empty SNI is not allowed, got %d", rr.Code)
+		}
+	})
+	t.Run("allow rules still require current RNDIS mode", func(t *testing.T) {
+		daemon.current_mode_rndis.Store(false)
+		defer daemon.current_mode_rndis.Store(true)
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/generate?server_name=sub.allowed.test&signature_schemes=0403&local_ip=10.0.0.10", nil)
+		service.handle_generate(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 outside RNDIS mode, got %d", rr.Code)
+		}
+		rr = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/ask?domain=sub.allowed.test", nil)
+		service.handle_ask(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("expected ask to return 403 outside RNDIS mode, got %d", rr.Code)
+		}
+	})
 }
 
 func TestGenerateLeafKeyUsesCaddySignatureSchemes(t *testing.T) {

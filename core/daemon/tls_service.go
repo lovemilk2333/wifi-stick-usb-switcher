@@ -38,6 +38,7 @@ type TlsService struct {
 	root_signer   crypto.Signer
 	algorithm     string
 	leaf_duration time.Duration
+	tls_allow     []tlsAllowRule
 	cache_lock    sync.Mutex
 	cert_cache    map[string]cached_tls_certificate
 }
@@ -49,7 +50,7 @@ type cached_tls_certificate struct {
 }
 
 // NewTlsService constructs the service and validates its root CA and private key.
-func NewTlsService(listen string, daemon *Daemon, rootCertPEM, rootKeyPEM []byte, algorithm string, leafDurations ...time.Duration) (*TlsService, error) {
+func NewTlsService(listen string, daemon *Daemon, rootCertPEM, rootKeyPEM []byte, algorithm string, allowValues []string, leafDurations ...time.Duration) (*TlsService, error) {
 	listen = strings.TrimSpace(listen)
 	if listen == "" {
 		listen = TLS_SERVICE_DEFAULT_LISTEN
@@ -70,6 +71,10 @@ func NewTlsService(listen string, daemon *Daemon, rootCertPEM, rootKeyPEM []byte
 	}
 	if !supported_tls_algorithm(algorithm) {
 		return nil, fmt.Errorf("unsupported TLS leaf algorithm %q (supported: ecdsa-p256, ecdsa-p384, ecdsa-p521, or rsa<bits> with bits >= 4096)", algorithm)
+	}
+	allowed, err := parse_tls_allow(allowValues)
+	if err != nil {
+		return nil, err
 	}
 	pair, err := tls.X509KeyPair(rootCertPEM, rootKeyPEM)
 	if err != nil {
@@ -105,6 +110,7 @@ func NewTlsService(listen string, daemon *Daemon, rootCertPEM, rootKeyPEM []byte
 		root_signer:   signer,
 		algorithm:     algorithm,
 		leaf_duration: leafDuration,
+		tls_allow:     allowed,
 		cert_cache:    make(map[string]cached_tls_certificate),
 	}, nil
 }
@@ -142,12 +148,25 @@ func (this *TlsService) handle_ask(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	ip, err := netip.ParseAddr(strings.TrimSpace(r.URL.Query().Get("domain")))
-	if err != nil {
+	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+	if domain == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if !this.daemon.rndis_owns_ip(ip) {
+	if !this.daemon.is_current_rndis_mode() {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if !valid_certificate_name(domain) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if len(this.tls_allow) > 0 {
+		if !this.tls_name_allowed(domain) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+	} else if ip, err := netip.ParseAddr(domain); err != nil || !this.daemon.rndis_owns_ip(ip) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -164,7 +183,7 @@ func (this *TlsService) handle_generate(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if !this.daemon.rndis_owns_ip(localIP) {
+	if !this.daemon.is_current_rndis_mode() {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -178,9 +197,24 @@ func (this *TlsService) handle_generate(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if nameIP, err := netip.ParseAddr(serverName); err == nil && !this.daemon.rndis_owns_ip(nameIP) {
-		w.WriteHeader(http.StatusForbidden)
-		return
+	if len(this.tls_allow) > 0 {
+		// When SNI is supplied it is the requested certificate identity and
+		// takes precedence over local_ip. IP ownership is intentionally not
+		// required here; current RNDIS mode plus the explicit allow rule gates
+		// issuance.
+		if !this.tls_name_allowed(serverName) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+	} else {
+		if !this.daemon.rndis_owns_ip(localIP) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if nameIP, err := netip.ParseAddr(serverName); err == nil && !this.daemon.rndis_owns_ip(nameIP) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 	}
 
 	certPEM, keyPEM, err := this.get_or_generate_certificate(serverName, r.URL.Query().Get("signature_schemes"))
@@ -193,6 +227,91 @@ func (this *TlsService) handle_generate(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(certPEM)
 	_, _ = w.Write(keyPEM)
+}
+
+type tlsAllowRule struct {
+	kind   string
+	prefix netip.Prefix
+	name   string
+}
+
+func parse_tls_allow(values []string) ([]tlsAllowRule, error) {
+	rules := make([]tlsAllowRule, 0, len(values))
+	for _, raw := range values {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		if value == "" {
+			return nil, fmt.Errorf("--tls-allow entries must not be empty")
+		}
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			rules = append(rules, tlsAllowRule{kind: "cidr", prefix: prefix.Masked()})
+			continue
+		}
+		if _, err := netip.ParseAddr(value); err == nil {
+			return nil, fmt.Errorf("--tls-allow IP entries must use CIDR notation: %q", raw)
+		}
+
+		rule := tlsAllowRule{kind: "exact", name: value}
+		switch {
+		case strings.HasPrefix(value, "+."):
+			rule.kind, rule.name = "subdomain", strings.TrimPrefix(value, "+.")
+		case strings.HasPrefix(value, "*."):
+			rule.kind, rule.name = "domain-and-subdomains", strings.TrimPrefix(value, "*.")
+		case strings.HasPrefix(value, "?."):
+			rule.kind, rule.name = "single-label", strings.TrimPrefix(value, "?.")
+		}
+		if strings.ContainsAny(rule.name, "*+?") || !valid_dns_name(rule.name) {
+			return nil, fmt.Errorf("invalid --tls-allow DNS pattern %q", raw)
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
+}
+
+func valid_dns_name(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	if _, err := netip.ParseAddr(name); err == nil {
+		return false
+	}
+	return valid_certificate_name(name)
+}
+
+func (this *TlsService) tls_name_allowed(name string) bool {
+	if len(this.tls_allow) == 0 {
+		return true
+	}
+	if ip, err := netip.ParseAddr(name); err == nil {
+		for _, rule := range this.tls_allow {
+			if rule.kind == "cidr" && rule.prefix.Contains(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	name = strings.ToLower(name)
+	for _, rule := range this.tls_allow {
+		switch rule.kind {
+		case "exact":
+			if name == rule.name {
+				return true
+			}
+		case "subdomain":
+			if name != rule.name && strings.HasSuffix(name, "."+rule.name) {
+				return true
+			}
+		case "domain-and-subdomains":
+			if name == rule.name || strings.HasSuffix(name, "."+rule.name) {
+				return true
+			}
+		case "single-label":
+			prefix := strings.TrimSuffix(name, "."+rule.name)
+			if len(prefix) == 1 && prefix != name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (this *TlsService) generate_certificate(serverName, signatureSchemes string) ([]byte, []byte, error) {

@@ -65,18 +65,20 @@ type DaemonCmd struct {
 	TlsRootCert     string        `arg:"--tls-root-cert" help:"PEM certificate for the TLS root CA"`
 	TlsAlgorithm    string        `arg:"--tls-algorithm" default:"ecdsa-p384" help:"TLS leaf key: ecdsa-p384 (default), ecdsa-p256, ecdsa-p521, or rsa<bits> (minimum 4096)"`
 	TlsLeafDuration time.Duration `arg:"--tls-leaf-duration" default:"26h" help:"TLS leaf certificate lifetime, such as 26h or 1d"`
+	TlsAllow        []string      `arg:"--tls-allow,separate" help:"allowed TLS IP network (CIDR) or DNS name pattern; repeatable; when set, issuance requires current RNDIS mode, e.g. --tls-allow=10.22.33.0/24 --tls-allow=*.example.com"`
 }
 
 type Daemon struct {
 	base.PathChecker
 
-	input_device  *input.InputDevice
-	controller    *usb.UsbGadgetController
-	interpreters  []*led.LedInterpreter
-	modes         []usb.UsbGadgetFunction
-	current_mode  int
-	mode_changed  bool
-	mode_changing bool
+	input_device       *input.InputDevice
+	controller         *usb.UsbGadgetController
+	interpreters       []*led.LedInterpreter
+	modes              []usb.UsbGadgetFunction
+	current_mode       int
+	current_mode_rndis atomic.Bool
+	mode_changed       bool
+	mode_changing      bool
 	// submode 选择中的切换(submode_changed):函数不变,apply_function
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
@@ -205,6 +207,16 @@ func (this *Daemon) current_gadget_spec() string {
 	return fmt.Sprintf("%s.%d", mode.GetName(), mode.GetSubmode())
 }
 
+func (this *Daemon) set_current_mode(index int) {
+	this.current_mode = index
+	_, isRndis := this.modes[index].(*usb.UsbGadgetRndis)
+	this.current_mode_rndis.Store(isRndis)
+}
+
+func (this *Daemon) is_current_rndis_mode() bool {
+	return this.current_mode_rndis.Load()
+}
+
 // handle_gadget_requests 消费 IPC 投递的查询/切换请求(仅在 mainloop 线程)。
 func (this *Daemon) handle_gadget_requests() {
 	for {
@@ -246,7 +258,7 @@ func (this *Daemon) handle_gadget_request(spec string) GadgetResponse {
 	switch {
 	case index != this.current_mode:
 		// 换模式:完整重建
-		this.current_mode = index
+		this.set_current_mode(index)
 		mode.SetSubmode(submode)
 		this.mode_changed = true
 		this.submode_changed = false
@@ -678,6 +690,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		mode.SetSubmode(submode)
 		this.modes = append(this.modes, mode)
 	}
+	this.set_current_mode(this.current_mode)
 
 	// ---- initialise LEDs --------------------------------------------------
 
@@ -708,7 +721,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		if err != nil {
 			return err
 		}
-		this.tls_service, err = NewTlsService(listen, this, rootCertPEM, rootKeyPEM, cmd.TlsAlgorithm, cmd.TlsLeafDuration)
+		this.tls_service, err = NewTlsService(listen, this, rootCertPEM, rootKeyPEM, cmd.TlsAlgorithm, cmd.TlsAllow, cmd.TlsLeafDuration)
 		if err != nil {
 			return err
 		}
@@ -885,8 +898,7 @@ func (this *Daemon) handle_events() {
 				this.mode_changed = true
 				this.submode_changed = true
 			} else {
-				this.current_mode++
-				this.current_mode %= len(this.modes)
+				this.set_current_mode((this.current_mode + 1) % len(this.modes))
 				this.mode_changed = true
 				this.submode_changed = false
 			}
