@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	ipc "github.com/james-barrow/golang-ipc"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/daemonipc"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/input"
@@ -51,7 +50,7 @@ type DaemonCmd struct {
 	AdbProduct           string           `arg:"--adb-product" default:"ADB Gadget" help:"the product string of the adb usb gadget device"`
 	AdbEnv               []string         `arg:"--adb-env,separate" help:"extra environment variables (KEY=VALUE) passed to the adbd process, repeatable, e.g. --adb-env=TERM=xterm-256color; default TERM=xterm-256color"`
 	DnsmasqArgs          []string         `arg:"--dnsmasq-arg,separate" help:"extra dnsmasq argument for the RNDIS DHCP server, repeatable; use the = form, e.g. --dnsmasq-arg=--addn-hosts=/etc/wifi-stick/hosts (a space-separated value starting with -- would be parsed as a flag); can override scalar defaults like --port=53"`
-	IPCAllowOtherUser    bool             `arg:"--ipc-share,--ipc-allow-other-user" default:"false" help:"allow other user to access IPC (UnmaskPermissions)"`
+	IPCAllowOtherUser    bool             `arg:"--ipc-share,--ipc-allow-other-user" default:"false" help:"allow users other than the daemon owner to use the control service"`
 	TickInterval         time.Duration    `arg:"--tick-rate,--tick-interval" default:"50ms" help:"deprecated argv, keep this to avoid error when provides this"`
 	RebindDelay          time.Duration    `arg:"--rebind-delay" default:"500ms" help:"delay between gadget teardown and UDC rebind; lower is faster, raise it if the host fails to recognize the device"`
 	ShutdownThreshold    time.Duration    `arg:"--shutdown-threshold" default:"5s" help:"long-press shutdown threshold, must be greater than --long-tap-threshold; 0 disables"`
@@ -87,10 +86,10 @@ type Daemon struct {
 	first_apply     bool // 启动首轮应用:不动 LED,交给并行的 init 指示
 	// 启动窗口协调:init 指示(逐颗点亮)与 gadget 应用并行,两侧都以
 	// 原子标志等对方完成后再显示模式状态
-	apply_done       atomic.Bool
-	led_init_done    atomic.Bool
-	turn_off_leds    atomic.Bool // IPC goroutine 写、apply_function goroutine 读,需原子
-	daemonipc_config *ipc.ServerConfig
+	apply_done           atomic.Bool
+	led_init_done        atomic.Bool
+	turn_off_leds        atomic.Bool // IPC goroutine 写、apply_function goroutine 读,需原子
+	ipc_allow_other_user bool
 
 	// submode selection state:长按进入选择模式后,短按切换 submode,
 	// 再长按退出。进入/退出选择时 LED 先关闭 submode_led_duration
@@ -507,29 +506,6 @@ func (this *Daemon) display_mode_state() {
 	}
 }
 
-// run_ipc_server 持续提供 IPC server。golang-ipc 的 server 是一次性的:
-// 握手失败(旧 cli 二进制、cli 半途退出)会关闭 listener、框架 mainloop
-// 退出 —— 死掉就重建(socket 文件由库 run() 先 RemoveAll,无残留)。
-// daemon 主循环不依赖 IPC,IPC 故障不影响设备功能。
-func (this *Daemon) run_ipc_server() {
-	for {
-		server, err := ipc.StartServer(base.PROJECT_IDENT, this.daemonipc_config)
-		if err != nil {
-			log.Printf("WARN: ipc server start: %v", err)
-		} else {
-			fw := daemonipc.InitServer(this) // 新框架,重新注册 handler
-			if err := fw.Start(server); err != nil {
-				log.Printf("WARN: ipc framework start: %v", err)
-				server.Close()
-			} else {
-				fw.Wait() // 阻塞到 mainloop 退出(Read 报错 break)
-				log.Printf("WARN: ipc server down, restarting")
-			}
-		}
-		time.Sleep(time.Second) // 避免失败风暴
-	}
-}
-
 var LED_MODE_BLINK *led.LedMode
 
 // parse_gadget_spec 解析 `--gadget` 条目:`name` 或 `name.N`
@@ -696,13 +672,9 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	this.interpreters = load_led_interpreters(cmd.Leds)
 
-	// ---- init ipc ----
-	// InitClient 注册响应包的 payload struct 到全局表,server 端
-	// SendPackage 校验时需要;server handler 由 run_ipc_server 每次注册
-	daemonipc.InitClient() // load client package definitions
-	this.daemonipc_config = &ipc.ServerConfig{
-		Encryption:        false,
-		UnmaskPermissions: cmd.IPCAllowOtherUser,
+	// ---- init control bus ----
+	if err := this.init_ipc(cmd.IPCAllowOtherUser); err != nil {
+		return err
 	}
 
 	// ---- TLS ask/certificate service (optional) ----------------------------

@@ -8,8 +8,10 @@
 # library at runtime. The repo ships neither libusbgx source nor binary.
 #
 # Usage:
-#   make cli-amd64            build for the host, output build/amd64/cli
-#   make cli-arm64            cross build, output build/arm64/cli
+#   make cli-amd64            build IPC transport for the host
+#   make cli-arm64-5.15       cross build IPC transport for the device
+#   make cli-dbus-amd64       build D-Bus transport for the host
+#   make cli-dbus-arm64-5.15  cross build D-Bus transport for the device
 #   make DEBUG=1 cli-amd64    build with debug info (-gcflags=all=-N -l)
 
 SHELL := /usr/bin/env bash
@@ -58,9 +60,11 @@ build/libusbgx/stub/arm64-5.15/libusbgx.so: $(STUB_SRC)
 
 # ---- cli ------------------------------------------------------------------
 
-.PHONY: all cli-amd64 cli-arm64-5.15 clean
+.PHONY: all all-dbus cli-amd64 cli-arm64-5.15 cli-dbus-amd64 cli-dbus-arm64-5.15 clean
 
 all: cli-amd64 cli-arm64-5.15
+
+all-dbus: cli-dbus-amd64 cli-dbus-arm64-5.15
 
 cli-amd64: build/libusbgx/stub/amd64/libusbgx.so
 	mkdir -p build/amd64
@@ -74,6 +78,19 @@ cli-arm64-5.15: build/libusbgx/stub/arm64-5.15/libusbgx.so
 		go build "$(GO_BUILD_FLAGS)" \
 		-ldflags "$(BASE_LDFLAGS) -linkmode external" \
 		-o build/arm64-5.15/cli ./cmd/cli.go
+
+cli-dbus-amd64: build/libusbgx/stub/amd64/libusbgx.so
+	mkdir -p build/dbus-amd64
+	CGO_ENABLED=1 CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/amd64) -lusbgx" \
+		go build -tags dbus "$(GO_BUILD_FLAGS)" -ldflags "$(BASE_LDFLAGS)" -o build/dbus-amd64/cli ./cmd/cli.go
+
+cli-dbus-arm64-5.15: build/libusbgx/stub/arm64-5.15/libusbgx.so
+	mkdir -p build/dbus-arm64-5.15
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET)" \
+		CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/arm64-5.15) -lusbgx" \
+		go build -tags dbus "$(GO_BUILD_FLAGS)" \
+		-ldflags "$(BASE_LDFLAGS) -linkmode external" \
+		-o build/dbus-arm64-5.15/cli ./cmd/cli.go
 
 clean:
 	rm -rf build

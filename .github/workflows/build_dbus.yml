@@ -1,0 +1,73 @@
+name: Build and Release (D-Bus)
+
+on:
+    workflow_dispatch:
+        inputs:
+            release_tag:
+                description: "Release Tag"
+                required: false
+                default: ""
+
+permissions:
+    contents: write
+
+jobs:
+    build:
+        name: Build and Release (D-Bus) Binaries
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version-file: "go.mod"
+                  cache: true
+
+            - name: Install Zig (arm64 5.15 cross to glibc 2.31)
+              run: |
+                  mkdir -p "$HOME/tools"
+                  curl -sL -o /tmp/zig.tar.xz \
+                      https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+                  tar -C "$HOME/tools" -xf /tmp/zig.tar.xz
+                  mv "$HOME/tools/zig-x86_64-linux-0.14.1" "$HOME/tools/zig"
+                  "$HOME/tools/zig/zig" version
+
+            - name: Run Make
+              run: |
+                  echo "Building..."
+
+                  make all-dbus
+
+            - name: Prepare Assets and Tag
+              id: prep
+              run: |
+                  mkdir -p release_dist
+
+                  tar -I zstd -cvf release_dist/cli-linux-amd64-dbus.tar.zst -C build/dbus-amd64 cli
+                  tar -I zstd -cvf release_dist/cli-linux-arm64-dbus.tar.zst -C build/dbus-arm64-5.15 cli
+                  cp dbus/io.github.lovemilk2333.wifi-stick-usb-switcher.go.conf release_dist/
+
+                  INPUT_TAG="${{ github.event.inputs.release_tag }}"
+                  if [ -n "$INPUT_TAG" ]; then
+                    TAG_NAME="$INPUT_TAG"
+                  else
+                    SHORT_SHA=$(git rev-parse --short HEAD)
+                    TAG_NAME="rolling-${SHORT_SHA}"
+                  fi
+
+                  echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ steps.prep.outputs.tag_name }}
+                  files: release_dist/*
+                  generate_release_notes: true
+                  overwrite_files: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

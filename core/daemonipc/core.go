@@ -112,10 +112,15 @@ func (this *IPCFramework) mainloop() {
 			continue
 		}
 
-		err = this.handle_data(IPCPackageType(msg.MsgType), msg.Data)
+		resp, err := this.HandleRequest(IPCPackageType(msg.MsgType), msg.Data)
 		if err != nil {
 			log.Printf("WARN: package handle error: %v", err)
 			continue
+		}
+		if resp != nil {
+			if err := this.SendPackage(resp); err != nil {
+				log.Printf("WARN: package response error: %v", err)
+			}
 		}
 	}
 }
@@ -166,7 +171,10 @@ func (this *IPCFramework) check_data(package_type IPCPackageType, data []byte) e
 	return nil
 }
 
-func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) error {
+// HandleRequest dispatches one encoded request and returns its response without
+// writing it to a transport. This lets alternate transports (such as D-Bus)
+// reuse the same typed handlers and validation as the stream IPC backend.
+func (this *IPCFramework) HandleRequest(package_type IPCPackageType, data []byte) (*IPCPackage, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("WARN: package call handler panic: %v", r)
@@ -193,12 +201,12 @@ func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) 
 	payload_struct := this.GetPayloadStruct(package_type)
 	if payload_struct == nil {
 		if fallback_handler == nil {
-			return fmt.Errorf("package cannot get payload struct for `%d`: %w", package_type, err)
+			return nil, fmt.Errorf("package cannot get payload struct for `%d`: %w", package_type, err)
 		}
 
 		resp_package, err = fallback_handler(this, HANDLER_STATUS_PAYLOAD_STRUCT_NOT_FOUND, nil, package_type, data)
 		if err != nil {
-			return fmt.Errorf("package cannot get payload struct for `%d`: %w", package_type, err)
+			return nil, fmt.Errorf("package cannot get payload struct for `%d`: %w", package_type, err)
 		}
 
 		goto handle_resp
@@ -207,12 +215,12 @@ func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) 
 	payload, err = this.parse_data(this.GetPayloadStruct(package_type), data)
 	if err != nil {
 		if fallback_handler == nil {
-			return fmt.Errorf("package cannot parse payload: no payload struct for `%d`: %w", package_type, err)
+			return nil, fmt.Errorf("package cannot parse payload: no payload struct for `%d`: %w", package_type, err)
 		}
 
 		resp_package, err = fallback_handler(this, HANDLER_STATUS_INVALID_PAYLOAD, err, package_type, data)
 		if err != nil {
-			return fmt.Errorf("package cannot parse payload: no payload struct for `%d`: %w", package_type, err)
+			return nil, fmt.Errorf("package cannot parse payload: no payload struct for `%d`: %w", package_type, err)
 		}
 
 		goto handle_resp
@@ -221,12 +229,12 @@ func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) 
 	handler = reflect.ValueOf(this.GetHandler(package_type))
 	if handler.Kind() != reflect.Func {
 		if fallback_handler == nil {
-			return fmt.Errorf("package cannot handle: invalid handler for `%d`", package_type)
+			return nil, fmt.Errorf("package cannot handle: invalid handler for `%d`", package_type)
 		}
 
 		resp_package, err = fallback_handler(this, HANDLER_STATUS_INVALID_HANDLER, nil, package_type, data)
 		if err != nil {
-			return fmt.Errorf("package cannot handle: invalid handler for `%d`", package_type)
+			return nil, fmt.Errorf("package cannot handle: invalid handler for `%d`", package_type)
 		}
 
 		goto handle_resp
@@ -262,12 +270,12 @@ func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) 
 		}
 	default:
 		if fallback_handler == nil {
-			return fmt.Errorf("package cannot handle: invalid handler result for `%d`", package_type)
+			return nil, fmt.Errorf("package cannot handle: invalid handler result for `%d`", package_type)
 		}
 
 		resp_package, err = fallback_handler(this, HANDLER_STATUS_INVALID_HANDLER_RESULT, nil, package_type, data)
 		if err != nil {
-			return fmt.Errorf("package cannot handle: invalid handler result for `%d`", package_type)
+			return nil, fmt.Errorf("package cannot handle: invalid handler result for `%d`", package_type)
 		}
 
 		goto handle_resp
@@ -286,13 +294,18 @@ func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) 
 
 handle_resp:
 	if err != nil {
-		return fmt.Errorf("package call handler error: %w", err)
-	} else if resp_package != nil {
-		return this.SendPackage(resp_package)
+		return nil, fmt.Errorf("package call handler error: %w", err)
 	}
-	// ignore no resp package
+	return resp_package, nil
+}
 
-	return nil
+// handle_data preserves the stream transport's historical dispatch helper.
+func (this *IPCFramework) handle_data(package_type IPCPackageType, data []byte) error {
+	response, err := this.HandleRequest(package_type, data)
+	if err != nil || response == nil {
+		return err
+	}
+	return this.SendPackage(response)
 }
 
 func (this *IPCFramework) payload2json(payload []any) ([]byte, error) {

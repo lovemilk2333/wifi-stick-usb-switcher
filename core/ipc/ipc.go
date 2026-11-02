@@ -9,14 +9,9 @@ import (
 	"strings"
 	"time"
 
-	ipc "github.com/james-barrow/golang-ipc"
-
-	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/base"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/daemonipc"
 	"github.com/lovemilk2333/wifi-stick-usb-switcher/core/typeinject"
 )
-
-var ipc_client_chan daemonipc.IPCClientRespChannel
 
 var ipc_mapping = map[string]daemonipc.IPCPackageType{
 	"led":    daemonipc.PACKAGE_TOGGLE_LED,
@@ -26,54 +21,26 @@ var ipc_mapping = map[string]daemonipc.IPCPackageType{
 }
 
 type IPCCmd struct {
-	Command        string        `arg:"positional" help:"IPC command name (e.g. led)"`
-	Timeout        time.Duration `arg:"-t,--timeout" default:"10s" help:"wait IPC response timeout"`
-	ConnectTimeout time.Duration `arg:"--connect-timeout" default:"5s" help:"IPC dial and handshake timeout"`
-	DialRetry      time.Duration `arg:"--dial-retry" default:"1s" help:"IPC dial retry interval"`
-	List           bool          `arg:"--list" help:"list all IPC commands and their argv"`
-	Args           []string      `arg:"positional" help:"arguments passed to the IPC command"`
+	Command        string        `arg:"positional" help:"operation: led, tap, gadget, or status"`
+	Timeout        time.Duration `arg:"-t,--timeout" default:"10s" help:"maximum time to wait for a daemon response"`
+	ConnectTimeout time.Duration `arg:"--connect-timeout" default:"5s" help:"maximum time to connect to the daemon"`
+	DialRetry      time.Duration `arg:"--dial-retry" default:"1s" help:"retry interval while connecting to the daemon"`
+	List           bool          `arg:"--list" help:"show available operations, argument types, and examples"`
+	Args           []string      `arg:"positional" help:"operation arguments; see --list for types and examples"`
 }
 
-// InitIPCClient starts the IPC client and returns the framework.
-// Responses are delivered on an internal channel consumed by CallIPC.
-func InitIPCClient(connect_timeout, dial_retry time.Duration) (*daemonipc.IPCFramework, error) {
-	daemonipc.InitServer(nil) // load server package definitions
-
-	ipc_client, channel := daemonipc.InitClient()
-	ipc_client_chan = channel
-
-	ipc_impl, err := ipc.StartClient(base.PROJECT_IDENT, &ipc.ClientConfig{
-		Encryption: false, // daemon server is unencrypted; must match or handshake fails
-		Timeout:    connect_timeout.Seconds(),
-		RetryTimer: time.Duration(dial_retry.Seconds()),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Start the mainloop first (the library's first status message blocks on an
-	// unbuffered channel; dial waits until it is read), then wait for the
-	// handshake before sending, else Write reports "Connecting".
-	err = ipc_client.Start(ipc_impl)
-	if err != nil {
-		return nil, err
-	}
-
-	deadline := time.Now().Add(connect_timeout)
-	for ipc_impl.StatusCode() != ipc.Connected {
-		if time.Now().After(deadline) {
-			ipc_impl.Close()
-			return nil, fmt.Errorf("IPC not connected: %s", ipc_impl.Status())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	return ipc_client, nil
+// IPCClient provides one request/response operation over the selected transport.
+type IPCClient interface {
+	Call(package_type daemonipc.IPCPackageType, payload []any, timeout time.Duration) (string, error)
+	Close() error
 }
 
 // CallIPC resolves command to a package type, builds the typed payload, sends it,
 // and returns the daemon's textual response.
-func CallIPC(ipc_client *daemonipc.IPCFramework, ipc_args *IPCCmd, command string, args []string) (string, error) {
+func CallIPC(ipc_client IPCClient, ipc_args *IPCCmd, command string, args []string) (string, error) {
+	if ipc_client == nil {
+		return "", fmt.Errorf("IPC client is not connected")
+	}
 	ipc_command := strings.TrimSpace(command)
 	package_type, ok := ipc_mapping[ipc_command]
 	if !ok {
@@ -85,20 +52,7 @@ func CallIPC(ipc_client *daemonipc.IPCFramework, ipc_args *IPCCmd, command strin
 		return "", err
 	}
 
-	if err := ipc_client.SendPackage(&daemonipc.IPCPackage{Type: package_type, Payload: payload}); err != nil {
-		return "", err
-	}
-
-	if ipc_client_chan == nil {
-		return "", fmt.Errorf("IPC client channel is not initialized")
-	}
-
-	select {
-	case resp := <-ipc_client_chan:
-		return resp, nil
-	case <-time.After(ipc_args.Timeout):
-		return "", fmt.Errorf("IPC timed out")
-	}
+	return ipc_client.Call(package_type, payload, ipc_args.Timeout)
 }
 
 // ipc_builders maps each package type to a builder function. The builder's typed
@@ -292,7 +246,14 @@ func ListCommandsString() string {
 		for i, a := range d.Args {
 			types[i] = a.Type
 		}
-		fmt.Fprintf(&b, "%s (pkg=%d): [%s]\n", d.Name, d.PackageType, strings.Join(types, ", "))
+		example := map[string]string{
+			"led":    "ipc led [on|off]",
+			"tap":    "ipc tap [tap|long|shutdown|multi <count>]",
+			"gadget": "ipc gadget [name[.submode]]",
+			"status": "ipc status",
+		}[d.Name]
+		fmt.Fprintf(&b, "%-7s args: [%s]\n        %s\n", d.Name, strings.Join(types, ", "), example)
 	}
+	b.WriteString("\nExamples:\n  ipc led off\n  ipc tap multi 3\n  ipc gadget rndis.1\n  ipc status\n")
 	return b.String()
 }
