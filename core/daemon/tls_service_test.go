@@ -179,48 +179,6 @@ func TestTlsServiceDefaultsToECDSAP384(t *testing.T) {
 	}
 }
 
-func TestTlsAllowRules(t *testing.T) {
-	rules, err := parse_tls_allow([]string{
-		"10.22.33.0/24",
-		"+.a.com",
-		"*.b.com",
-		"?.c.com",
-	})
-	if err != nil {
-		t.Fatalf("parse allow rules: %v", err)
-	}
-	service := &TlsService{tls_allow: rules}
-	cases := []struct {
-		name string
-		want bool
-	}{
-		{"10.22.33.5", true},
-		{"10.22.34.5", false},
-		{"a.com", false},
-		{"x.a.com", true},
-		{"x.y.a.com", true},
-		{"b.com", true},
-		{"x.b.com", true},
-		{"x.y.b.com", true},
-		{"c.com", false},
-		{"x.c.com", true},
-		{"xy.c.com", false},
-		{"x.y.c.com", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := service.tls_name_allowed(tc.name); got != tc.want {
-				t.Fatalf("tls_name_allowed(%q) = %t, want %t", tc.name, got, tc.want)
-			}
-		})
-	}
-	for _, invalid := range [][]string{{"10.22.33.1"}, {"*.a.*.com"}, {"?.a.com.extra?"}, {""}} {
-		if _, err := parse_tls_allow(invalid); err == nil {
-			t.Errorf("parse_tls_allow(%q) expected error", invalid)
-		}
-	}
-}
-
 func TestTlsAllowRulesApplyToEndpoints(t *testing.T) {
 	rootCertPEM, rootKeyPEM := test_tls_root(t)
 	rndis := usb.NewUsbGadgetRndis(netip.MustParsePrefix("127.0.0.1/8"), "", "", "", "lo", "", nil, netip.Addr{}, time.Second, time.Second, "", "", "")

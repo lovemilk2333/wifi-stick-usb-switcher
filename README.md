@@ -251,9 +251,9 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--tls-root-cert`         | —                                  | 与 root key 匹配的 CA 证书 PEM;启用 `--tls-service` 时必填 |
 | `--tls-algorithm`         | `ecdsa-p384`                       | 叶证书密钥算法:`ecdsa-p384`(默认)、`ecdsa-p256`、`ecdsa-p521`,或手动指定 `rsa4096` 及更大位数(1024 的倍数);X25519 密钥交换由 Caddy TLS 配置协商 |
 | `--tls-leaf-duration`    | `26h`                              | TLS 叶证书有效期,必须为正数;实际期限不会超过 CA 证书到期时间 |
-| `--tls-allow`            | 空                                 | 可重复的 TLS 名称允许规则;IP 必须写 CIDR,域名支持精确名称以及 `+.a.com`(仅子域)、`*.a.com`(根域和子域)、`?.a.com`(单字符标签);配置后只要求当前模式为 RNDIS,不要求 IP 已绑定到 RNDIS 网卡 |
+| `--tls-allow`            | 空                                 | 可重复的 TLS 名称允许规则;IP 必须写 CIDR,域名支持精确名称、`+.a.com`(仅子域)、`*.a.com`(根域和任意层子域)、`?.a.com`(单字符标签)、`+*.a.com`(以 `xn--` 开头的单层标签)及 `**.a.com`(任意层子域,不含根域);配置后只要求当前模式为 RNDIS,不要求 IP 已绑定到 RNDIS 网卡 |
 
-Caddy 可将 `get_certificate http` 指向 `http://127.0.0.1:50996/generate`，并将 `on_demand` 质询指向 `http://127.0.0.1:50996/ask`。配置一个或多个 `--tls-allow` 后,`/ask` 和 `/generate` 只接受匹配的 IP 网段或域名,同时要求 daemon 当前选择 RNDIS 模式,不要求目标 IP 已绑定到 RNDIS 网卡;未配置时保留原有允许行为和 IP 归属校验。`/generate` 优先按非空 `server_name`(SNI)匹配白名单;SNI 为空时改用 `local_ip` 匹配并作为叶证书 CN/SAN。示例: `--tls-allow=10.22.33.0/24 --tls-allow=*.a.com --tls-allow=+.b.com --tls-allow=?.c.com`。Caddy 配置请参考 [Caddyfile.example](./Caddyfile.example)
+Caddy 可将 `get_certificate http` 指向 `http://127.0.0.1:50996/generate`，并将 `on_demand` 质询指向 `http://127.0.0.1:50996/ask`。配置一个或多个 `--tls-allow` 后,`/ask` 和 `/generate` 只接受匹配的 IP 网段或域名,同时要求 daemon 当前选择 RNDIS 模式,不要求目标 IP 已绑定到 RNDIS 网卡;未配置时保留原有允许行为和 IP 归属校验。`/generate` 优先按非空 `server_name`(SNI)匹配白名单;SNI 为空时改用 `local_ip` 匹配并作为叶证书 CN/SAN。通配示例: `+.a.com` 匹配 `x.a.com` 等子域,不含根域, `*.a.com` 还匹配根域 `a.com`, `+*.a.com` 匹配 `xn--` 开头的单层子域标签,`**.a.com` 匹配 `x.y.a.com` 等任意深度子域。示例参数: `--tls-allow=10.22.33.0/24 --tls-allow=*.a.com --tls-allow=+*.b.com --tls-allow=**.c.com --tls-allow=?.d.com`。Caddy 配置请参考 [Caddyfile.example](./Caddyfile.example)
 
 > [!NOTE]
 > 对于 Chrome >= 134, 可以访问 `chrome://certificate-manager/` 管理 Chrome Level 的证书
