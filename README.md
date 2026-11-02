@@ -115,6 +115,14 @@ sudo apt install dnsmasq udhcpc iproute2
 sudo install -m 0755 cli /usr/local/bin/usb-switcher
 ```
 
+`-dbus` 版本首次启动时会把内嵌的 system-bus policy 安装到 `/etc/dbus-1/system.d/`,并请求 system bus 重载配置。systemd unit 需要允许写入该目录(示例 unit 已配置)。若设备上的 D-Bus 实现拒绝重载,日志会提示手动重启 `dbus.service` 后再重启本服务。daemon 必须以 policy 中授权的 `root` 用户运行。
+
+然后在启动脚本中把 `daemon` 后加上 `--ipc-share` 之外的 IPC 选项按需配置即可;`--ipc-share` 控制是否允许不同 UID 的客户端,默认只允许 daemon 所属 UID。重启服务使 D-Bus 连接重新建立:
+
+```bash
+sudo systemctl restart wifi-stick-usb-switcher.service
+```
+
 ### 3. 配置启动脚本
 
 > 参考 `scripts/start.sh.example`(参数化版本,可传 `$@` 覆盖参数)/ `scripts/test.sh.example`

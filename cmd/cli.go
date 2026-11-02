@@ -61,6 +61,7 @@ func main() {
 			os.Exit(65)
 		}
 
+		defer fw.Close()
 		msg, err := ipc.CallIPC(fw, args.IPC, args.IPC.Command, args.IPC.Args)
 		if err != nil {
 			log.Printf("cannot call IPC: %v", err)

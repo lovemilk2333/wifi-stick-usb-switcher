@@ -41,15 +41,18 @@ jobs:
               run: |
                   echo "Building..."
 
-                  make all
+                  make all all-dbus
 
             - name: Prepare Assets and Tag
               id: prep
               run: |
                   mkdir -p release_dist
 
-                  tar -I zstd -cvf release_dist/cli-linux-amd64.tar.zst -C build/amd64 cli
-                  tar -I zstd -cvf release_dist/cli-linux-arm64.tar.zst -C build/arm64-5.15 cli
+                  tar -I zstd -cvf release_dist/cli-linux-amd64-ipc.tar.zst -C build/amd64 cli
+                  tar -I zstd -cvf release_dist/cli-linux-arm64-ipc.tar.zst -C build/arm64-5.15 cli
+                  tar -I zstd -cvf release_dist/cli-linux-amd64-dbus.tar.zst -C build/dbus-amd64 cli
+                  tar -I zstd -cvf release_dist/cli-linux-arm64-dbus.tar.zst -C build/dbus-arm64-5.15 cli
+                  cp dbus/io.github.lovemilk2333.wifi-stick-usb-switcher.go.conf release_dist/
 
                   INPUT_TAG="${{ github.event.inputs.release_tag }}"
                   if [ -n "$INPUT_TAG" ]; then
@@ -67,5 +70,6 @@ jobs:
                   tag_name: ${{ steps.prep.outputs.tag_name }}
                   files: release_dist/*
                   generate_release_notes: true
+                  overwrite_files: true
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

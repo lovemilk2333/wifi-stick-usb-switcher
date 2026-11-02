@@ -22,6 +22,7 @@ ProtectHome=true
 PrivateTmp=false
 ReadWritePaths=/sys/kernel/config/usb_gadget /sys/class/leds /etc/resolv.conf /tmp
 ReadWritePaths=-/etc/NetworkManager/conf.d
+ReadWritePaths=-/etc/dbus-1/system.d
 ProtectControlGroups=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
