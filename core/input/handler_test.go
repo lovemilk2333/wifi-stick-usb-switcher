@@ -29,6 +29,23 @@ func TestInjectEvent(t *testing.T) {
 	}
 }
 
+func TestNewSyntheticDevice(t *testing.T) {
+	dev := NewSyntheticDevice(nil)
+	if dev == nil || dev.Events() == nil {
+		t.Fatal("expected synthetic input device with wake channel")
+	}
+	dev.InjectEvent(&InputEvent{Type: INPUT_TAP, Status: DEVICE_STATUS_NORMAL})
+	select {
+	case <-dev.Events():
+	case <-time.After(time.Second):
+		t.Fatal("synthetic event did not wake consumer")
+	}
+	events := dev.DrainEvents()
+	if len(events) != 1 || events[0].Type != INPUT_TAP {
+		t.Fatalf("unexpected synthetic events %+v", events)
+	}
+}
+
 func TestInjectPress(t *testing.T) {
 	dev := new_test_device()
 

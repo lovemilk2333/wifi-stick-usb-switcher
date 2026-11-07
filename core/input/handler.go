@@ -472,3 +472,26 @@ func NewDevice(devnode string, config *InputDeviceConfig) (*InputDevice, error) 
 
 	return device, nil
 }
+
+// NewSyntheticDevice creates an input event source backed only by its
+// injection queue. It is used when no physical evdev node is configured so
+// IPC button actions can still use the daemon's normal event path.
+func NewSyntheticDevice(config *InputDeviceConfig) *InputDevice {
+	if config == nil {
+		config = &InputDeviceConfig{}
+	}
+	if config.LongTapThreshold <= 0 {
+		config.LongTapThreshold = 300 * time.Millisecond
+	}
+	if config.MultipleTapThreshold == 0 {
+		config.MultipleTapThreshold = 300 * time.Millisecond
+	}
+	if config.MultipleTapMaxCount < 2 {
+		config.MultipleTapMaxCount = 5
+	}
+	return &InputDevice{
+		Config:      config,
+		event_queue: list.New(),
+		wake:        make(chan struct{}, 1),
+	}
+}

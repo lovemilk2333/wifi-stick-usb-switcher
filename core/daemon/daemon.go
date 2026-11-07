@@ -23,7 +23,7 @@ import (
 // https://github.com/james-barrow/golang-ipc
 
 type DaemonCmd struct {
-	Devnode              string           `arg:"-d,required" help:"button devnode path"`
+	Devnode              string           `arg:"-d" help:"button devnode path; omit to disable physical button input (IPC tap remains available)"`
 	LongTapImmediately   bool             `arg:"--long-tap-immediately" default:"true" help:"emit long-tap when pressing time >= LongTapThreshold, even button is still pressing"`
 	LongTapThreshold     time.Duration    `arg:"--long-tap-threshold" default:"500ms" help:"the threshold of long-tap, such as 500ms, 1s"`
 	MultipleTapThreshold time.Duration    `arg:"--multiple-tap-threshold" default:"500ms" help:"the threshold of multiple-tap, lower than zero means disable, such as 500ms, 1s"`
@@ -529,7 +529,7 @@ func parse_gadget_spec(spec string) (string, int, error) {
 // init validates cmd and stores all initialised handles on the Daemon struct.
 func (this *Daemon) init(cmd *DaemonCmd) error {
 	// ---- validate arguments ------------------------------------------------
-	if this.IsValidPath(cmd.Devnode, "/dev/input/", true, true) != base.PATH_STATUS_OK {
+	if cmd.Devnode != "" && this.IsValidPath(cmd.Devnode, "/dev/input/", true, true) != base.PATH_STATUS_OK {
 		return fmt.Errorf("`%s` is not a valid input device", cmd.Devnode)
 	}
 
@@ -593,22 +593,28 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 
 	// ---- initialise input device ------------------------------------------
 
-	inputDevice, err := input.NewDevice(cmd.Devnode, &input.InputDeviceConfig{
+	inputConfig := &input.InputDeviceConfig{
 		LongTapThreshold:     cmd.LongTapThreshold,
 		MultipleTapThreshold: cmd.MultipleTapThreshold,
 		LongTapImmediately:   cmd.LongTapImmediately,
-	})
-	if err != nil {
-		return fmt.Errorf("cannot create input device: %w", err)
 	}
+	if cmd.Devnode == "" {
+		log.Printf("WARN: no input device configured; physical button switching disabled (IPC tap remains available)\n")
+		this.input_device = input.NewSyntheticDevice(inputConfig)
+	} else {
+		inputDevice, err := input.NewDevice(cmd.Devnode, inputConfig)
+		if err != nil {
+			return fmt.Errorf("cannot create input device: %w", err)
+		}
 
-	status, err := inputDevice.Open()
-	if status != input.DEVICE_STATUS_NORMAL {
-		return fmt.Errorf("cannot open input device (%d): %w", status, err)
+		status, err := inputDevice.Open()
+		if status != input.DEVICE_STATUS_NORMAL {
+			return fmt.Errorf("cannot open input device (%d): %w", status, err)
+		}
+
+		inputDevice.StartDaemon()
+		this.input_device = inputDevice
 	}
-
-	inputDevice.StartDaemon()
-	this.input_device = inputDevice
 
 	// ---- initialise USB gadget controller ---------------------------------
 

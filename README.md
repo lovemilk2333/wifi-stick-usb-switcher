@@ -221,7 +221,7 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 
 | 参数                       | 默认值                             | 说明                                                |
 | :------------------------- | :--------------------------------- | :-------------------------------------------------- |
-| `-d, --devnode`            | 必填                               | 按键设备节点,如 `/dev/input/event0`                 |
+| `-d, --devnode`            | —                                  | 按键设备节点,如 `/dev/input/event0`;省略时禁用物理按键切换,仍保留 IPC tap |
 | `--long-tap-immediately`   | `true`                             | 按下时间达到阈值立即上报长按,不等松开               |
 | `--long-tap-threshold`     | `500ms`                            | 长按阈值                                            |
 | `--multiple-tap-threshold` | `500ms`                            | 连击阈值,< 0 禁用                                   |
