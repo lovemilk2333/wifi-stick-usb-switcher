@@ -115,7 +115,7 @@ sudo apt install dnsmasq udhcpc iproute2
 sudo install -m 0755 cli /usr/local/bin/usb-switcher
 ```
 
-`-dbus` 版本首次启动时会把内嵌的 system-bus policy 安装到 `/etc/dbus-1/system.d/`,并请求 system bus 重载配置。systemd unit 需要允许写入该目录(示例 unit 已配置)。若设备上的 D-Bus 实现拒绝重载,日志会提示手动重启 `dbus.service` 后再重启本服务。daemon 必须以 policy 中授权的 `root` 用户运行。
+`-dbus` 版本首次启动时会把内嵌的 system-bus policy 原子安装到 `/etc/dbus-1/system.d/`,并请求 system bus 重载配置。systemd unit 必须使用示例中的 `ReadWritePaths=/etc/dbus-1/system.d`（旧 unit 若仍报 `read-only file system`,请重新复制 unit 后执行 `systemctl daemon-reload` 再重启服务）。若设备上的 D-Bus 实现拒绝重载,日志会提示手动重启 `dbus.service` 后再重启本服务。daemon 必须以 policy 中授权的 `root` 用户运行。
 
 然后在启动脚本中把 `daemon` 后加上 `--ipc-share` 之外的 IPC 选项按需配置即可;`--ipc-share` 控制是否允许不同 UID 的客户端,默认只允许 daemon 所属 UID。重启服务使 D-Bus 连接重新建立:
 
@@ -247,6 +247,8 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--adb-manufacturer`       | `Google`                           | ADB 模式的产品字符串                                |
 | `--adb-product`            | `ADB Gadget`                       | ADB 模式的产品字符串                                |
 | `--adb-env`                | `TERM=xterm-256color`              | adbd 附加环境变量,可重复                            |
+| `--user`                   | —                                  | 可选:adbd 以指定用户身份运行,继承该用户的 UID、主组、全部附加组以及 HOME/USER/LOGNAME;不改变 daemon 身份,也不降权 dnsmasq(其 DHCP/端口操作仍由 root 执行) |
+| `--group`                  | —                                  | 可选:覆盖 adbd 的主组;附加组仍来自目标用户(未指定 `--user` 时为目标 UID 对应用户),可单独指定组以保留 daemon 当前 UID |
 | `--dnsmasq-arg`            | —                                  | 附加 dnsmasq 参数,可重复,见下节                     |
 | `--ipc-share`              | `false`                            | 允许其他用户访问 IPC(unix socket 权限放宽)          |
 | `--tick-rate`              | `50ms`                             | event-driven 主循环的兜底轮询间隔(按键/关机/rebind 等均由事件唤醒;此值仅作安全网) |
@@ -260,6 +262,8 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--tls-algorithm`         | `ecdsa-p384`                       | 叶证书密钥算法:`ecdsa-p384`(默认)、`ecdsa-p256`、`ecdsa-p521`,或手动指定 `rsa4096` 及更大位数(1024 的倍数);X25519 密钥交换由 Caddy TLS 配置协商 |
 | `--tls-leaf-duration`    | `26h`                              | TLS 叶证书有效期,必须为正数;实际期限不会超过 CA 证书到期时间 |
 | `--tls-allow`            | 空                                 | 可重复的 TLS 名称允许规则;IP 必须写 CIDR,域名支持精确名称、`+.a.com`(仅子域)、`*.a.com`(根域和任意层子域)、`?.a.com`(单字符标签)、`+*.a.com`(以 `xn--` 开头的单层标签)及 `**.a.com`(任意层子域,不含根域);配置后只要求当前模式为 RNDIS,不要求 IP 已绑定到 RNDIS 网卡 |
+
+> adbd 以 root 身份运行时,工作目录和 `HOME` 使用 `/root`;通过 `--user` 切换身份时改用目标用户的家目录,不会继承 `/root`,避免 `cd` 因 `/root` 权限不足而失败。
 
 Caddy 可将 `get_certificate http` 指向 `http://127.0.0.1:50996/generate`，并将 `on_demand` 质询指向 `http://127.0.0.1:50996/ask`。配置一个或多个 `--tls-allow` 后,`/ask` 和 `/generate` 只接受匹配的 IP 网段或域名,同时要求 daemon 当前选择 RNDIS 模式,不要求目标 IP 已绑定到 RNDIS 网卡;未配置时保留原有允许行为和 IP 归属校验。`/generate` 优先按非空 `server_name`(SNI)匹配白名单;SNI 为空时改用 `local_ip` 匹配并作为叶证书 CN/SAN。通配示例: `+.a.com` 匹配 `x.a.com` 等子域,不含根域, `*.a.com` 还匹配根域 `a.com`, `+*.a.com` 匹配 `xn--` 开头的单层子域标签,`**.a.com` 匹配 `x.y.a.com` 等任意深度子域。示例参数: `--tls-allow=10.22.33.0/24 --tls-allow=*.a.com --tls-allow=+*.b.com --tls-allow=**.c.com --tls-allow=?.d.com`。Caddy 配置请参考 [Caddyfile.example](./Caddyfile.example)
 

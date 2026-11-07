@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -37,6 +39,11 @@ func CleanupRuntime() {
 // 重启)时用它精确停掉自己启动的 adbd
 const adbdPidFile = "/tmp/" + base.PROJECT_IDENT + "-adbd.pid"
 
+// adbdReadyTimeout bounds the time spent waiting for adbd to publish its
+// FunctionFS descriptors. Without this bound a failed adbd/lock setup leaves
+// the daemon stuck in the mode-switch LED indication forever.
+const adbdReadyTimeout = 2 * time.Second
+
 // adbd_ffs_path 是 functionfs 挂载点(daemon 传入的 ffs 路径,清理用)
 const adbd_ffs_path = "/dev/usb-ffs/adb"
 
@@ -48,6 +55,8 @@ type UsbGadgetAdb struct {
 	serial_number string
 	manufacturer  string
 	product       string
+	run_as_user   string
+	run_as_group  string
 
 	// envs 是传给 adbd 进程的额外环境变量(KEY=VALUE),由 --adb-env 传入,
 	// 默认 ["TERM=xterm-256color"],保证 adb shell 有正确的终端类型。
@@ -99,27 +108,217 @@ func (this *UsbGadgetAdb) effect(ctx *UsbGadgetFunctionContext) error {
 
 	kill_adbd()
 
-	homedir, _ := os.UserHomeDir()
-	if homedir == "" {
-		homedir = "/root"
+	adbd_path, err := exec.LookPath("adbd")
+	if err != nil {
+		return fmt.Errorf("find adbd executable: %w", err)
 	}
-	adbd_process = exec.Command("adbd", "-D")
-	adbd_process.Dir = homedir
-	adbd_process.Env = merge_envs(this.envs)
+
+	adbd_process = exec.Command(adbd_path, "-D")
+	adbd_process.Stdout = os.Stdout
+	adbd_process.Stderr = os.Stderr
+
+	env_extras := []string{}
+	if this.run_as_user != "" || this.run_as_group != "" {
+		identity, err := resolve_adbd_identity(this.run_as_user, this.run_as_group)
+		if err != nil {
+			adbd_process = nil
+			return fmt.Errorf("resolve adbd identity: %w", err)
+		}
+		adbd_process.Dir = identity.home
+		env_extras = identity.env()
+		if err := os.Chmod(this.ffs_path, 0770); err != nil {
+			adbd_process = nil
+			return fmt.Errorf("set FunctionFS permissions for adbd: %w", err)
+		}
+		if err := os.Chown(this.ffs_path, int(identity.uid), int(identity.gid)); err != nil {
+			adbd_process = nil
+			return fmt.Errorf("set FunctionFS owner for adbd: %w", err)
+		}
+		adbd_process.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
+			Uid:    identity.uid,
+			Gid:    identity.gid,
+			Groups: identity.groups,
+		}}
+		log.Printf("INFO: launching adbd path=%s dir=%s uid=%d gid=%d groups=%v (user=%s group=%s)\n",
+			adbd_path, identity.home, identity.uid, identity.gid, identity.groups, this.run_as_user, this.run_as_group)
+	} else {
+		adbd_process.Dir = adbdHomeDir("")
+		// Keep HOME/USER/LOGNAME consistent with the working directory. For
+		// root this is /root, matching a normal root login.
+		env_extras = []string{"HOME=" + adbd_process.Dir}
+		if account, err := user.Current(); err == nil {
+			env_extras = append(env_extras, "USER="+account.Username, "LOGNAME="+account.Username)
+		}
+		log.Printf("INFO: launching adbd path=%s dir=%s uid=%d gid=%d\n",
+			adbd_path, adbd_process.Dir, os.Geteuid(), os.Getegid())
+	}
+	adbd_process.Env = merge_envs(append(env_extras, this.envs...))
+	dir := adbd_process.Dir
 	if err := adbd_process.Start(); err != nil {
 		adbd_process = nil
-		return fmt.Errorf("start adbd: %w", err)
+		return fmt.Errorf("start adbd (path=%s dir=%s): %w", adbd_path, dir, err)
 	}
+	log.Printf("INFO: adbd started (pid %d), waiting up to %s for FunctionFS descriptors\n", adbd_process.Process.Pid, adbdReadyTimeout)
 
 	// pid 文件供 kill_adbd 在句柄丢失(daemon 重启)时兜底
 	if err := os.WriteFile(adbdPidFile, []byte(strconv.Itoa(adbd_process.Process.Pid)+"\n"), 0644); err != nil {
 		log.Printf("WARN: cannot write %s: %v\n", adbdPidFile, err)
 	}
 
-	// 等 adbd 写完 ep0 描述符,否则 UDC 绑定失败
-	time.Sleep(100 * time.Millisecond)
+	// adbd writes its descriptors to ep0; ep1 appears once the FunctionFS
+	// endpoint set has been published. Poll instead of sleeping blindly so a
+	// missing lock, permission failure, or early adbd exit is reported quickly.
+	deadline := time.Now().Add(adbdReadyTimeout)
+	ep1 := filepath.Join(this.ffs_path, "ep1")
+	probe := time.NewTicker(20 * time.Millisecond)
+	defer probe.Stop()
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(ep1); err == nil {
+			log.Printf("INFO: adbd FunctionFS descriptors ready (pid %d)\n", adbd_process.Process.Pid)
+			return nil
+		}
+		if err := adbd_process.Process.Signal(syscall.Signal(0)); err != nil {
+			kill_adbd()
+			return fmt.Errorf("adbd exited before FunctionFS descriptors were ready: %w", err)
+		}
+		select {
+		case <-probe.C:
+		}
+	}
+	pid := adbd_process.Process.Pid
+	log.Printf("WARN: adbd FunctionFS descriptors not ready after %s (pid %d); stopping adbd\n", adbdReadyTimeout, pid)
+	kill_adbd()
+	return fmt.Errorf("adbd FunctionFS descriptors timeout after %s", adbdReadyTimeout)
+}
 
-	return nil
+// adbdHomeDir returns the working directory for adbd. Root keeps /root so an
+// interactive root shell starts where root expects; a --user run uses that
+// user's home instead of inheriting /root from the daemon.
+func adbdHomeDir(run_as_user string) string {
+	if run_as_user != "" {
+		if account, err := user.Lookup(run_as_user); err == nil && account.HomeDir != "" {
+			return account.HomeDir
+		}
+	}
+	if account, err := user.Current(); err == nil && account.HomeDir != "" {
+		return account.HomeDir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		if os.Geteuid() == 0 {
+			return "/root"
+		}
+		return "/"
+	}
+
+	return home
+}
+
+// adbdIdentity is the complete runtime identity for adbd: UID, primary GID,
+// supplementary groups, and the account used for HOME/USER/LOGNAME.
+type adbdIdentity struct {
+	uid    uint32
+	gid    uint32
+	groups []uint32
+	user   string
+	home   string
+}
+
+// env returns the identity-related environment for the adbd child. Explicit
+// --adb-env entries are merged afterwards and take precedence.
+func (this *adbdIdentity) env() []string {
+	env := make([]string, 0, 3)
+	if this.home != "" {
+		env = append(env, "HOME="+this.home)
+	}
+	if this.user != "" {
+		env = append(env, "USER="+this.user, "LOGNAME="+this.user)
+	}
+	return env
+}
+
+// resolve_adbd_identity resolves the target user/group and all supplementary
+// groups, so adbd receives the same permissions as an interactive login of
+// that user, not just uid/gid.
+func resolve_adbd_identity(user_name, group_name string) (*adbdIdentity, error) {
+	identity := &adbdIdentity{
+		uid:  uint32(os.Geteuid()),
+		gid:  uint32(os.Getegid()),
+		home: adbdHomeDir(user_name),
+	}
+
+	var account *user.User
+	var err error
+	if user_name != "" {
+		account, err = user.Lookup(user_name)
+		if err != nil {
+			return nil, fmt.Errorf("lookup user %q: %w", user_name, err)
+		}
+	} else {
+		// --group without --user: keep the daemon UID/home but still resolve
+		// the current account for supplementary groups.
+		account, _ = user.Current()
+	}
+
+	if account != nil {
+		if account.Uid != "" {
+			parsed_uid, err := strconv.ParseUint(account.Uid, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid uid for user %q: %w", account.Username, err)
+			}
+			identity.uid = uint32(parsed_uid)
+		}
+		if account.Gid != "" {
+			parsed_gid, err := strconv.ParseUint(account.Gid, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid primary gid for user %q: %w", account.Username, err)
+			}
+			identity.gid = uint32(parsed_gid)
+		}
+		identity.user = account.Username
+		if account.HomeDir != "" {
+			identity.home = account.HomeDir
+		}
+
+		group_ids, err := account.GroupIds()
+		if err != nil {
+			return nil, fmt.Errorf("lookup supplementary groups for user %q: %w", account.Username, err)
+		}
+		for _, group_id := range group_ids {
+			parsed_gid, err := strconv.ParseUint(group_id, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid supplementary gid %q for user %q: %w", group_id, account.Username, err)
+			}
+			identity.groups = append_group(identity.groups, uint32(parsed_gid))
+		}
+	}
+
+	if group_name != "" {
+		group, err := user.LookupGroup(group_name)
+		if err != nil {
+			return nil, fmt.Errorf("lookup group %q: %w", group_name, err)
+		}
+		parsed_gid, err := strconv.ParseUint(group.Gid, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid gid for group %q: %w", group_name, err)
+		}
+		identity.gid = uint32(parsed_gid)
+	}
+
+	// Always include the primary GID. A non-empty group list also makes exec
+	// call setgroups(2), which clears supplementary groups inherited from the
+	// root daemon instead of keeping root-only access.
+	identity.groups = append_group(identity.groups, identity.gid)
+	return identity, nil
+}
+
+func append_group(groups []uint32, gid uint32) []uint32 {
+	for _, existing := range groups {
+		if existing == gid {
+			return groups
+		}
+	}
+	return append(groups, gid)
 }
 
 // merge_envs 返回继承自当前进程的环境,并把额外环境变量(KEY=VALUE)合并进去。
@@ -214,7 +413,7 @@ func SnapshotUsbGadgetAdb(instance string) *UsbGadgetAdb {
 	return adb
 }
 
-func NewUsbGadgetAdb(ffs_path string, serial_number string, manufacturer string, product string, envs []string) *UsbGadgetAdb {
+func NewUsbGadgetAdb(ffs_path string, serial_number string, manufacturer string, product string, envs []string, run_as_user string, run_as_group string) *UsbGadgetAdb {
 	adb := &UsbGadgetAdb{}
 
 	adb.dev_name = "adb"
@@ -223,6 +422,8 @@ func NewUsbGadgetAdb(ffs_path string, serial_number string, manufacturer string,
 	adb.manufacturer = manufacturer
 	adb.product = product
 	adb.envs = envs
+	adb.run_as_user = run_as_user
+	adb.run_as_group = run_as_group
 
 	adb._type = "ffs"
 	adb.code = USB_GADGET_FUNCTION_CODE_ADB

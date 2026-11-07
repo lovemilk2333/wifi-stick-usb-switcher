@@ -234,10 +234,7 @@ func (this *LedInterpreter) loop(ctx context.Context) {
 		this.lock.Unlock()
 
 		if static_mode {
-			select {
-			case <-ctx.Done():
-				return
-			}
+			<-ctx.Done()
 			return
 		}
 

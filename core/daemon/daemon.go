@@ -57,6 +57,8 @@ type DaemonCmd struct {
 	ShutdownCommand      string           `arg:"--shutdown-command" default:"poweroff" help:"command run when long-press shutdown triggers"`
 	ShutdownShell        string           `arg:"--shutdown-shell" default:"" help:"shell used to run --shutdown-command"`
 	ShutdownTimeout      time.Duration    `arg:"--shutdown-timeout" default:"30s" help:"run --shutdown-command timeout"`
+	User                 string           `arg:"--user" help:"run adbd as this user; dnsmasq and privileged gadget setup remain root"`
+	Group                string           `arg:"--group" help:"run adbd with this group; defaults to the selected user's primary group"`
 	// TlsService enables Caddy's on-demand ask and HTTP certificate endpoints.
 	// Empty (flag present, no value) selects the default listen address.
 	TlsService      []string      `arg:"--tls-service" help:"enable Caddy TLS service; optional listen addr, default 127.0.0.1:50996" placeholder:"[ADDR]"`
@@ -128,6 +130,17 @@ type Daemon struct {
 	rebind_delay    time.Duration
 	pending_enable  bool
 	enable_deadline time.Time
+	// pending_apply 是阶段一正在构建的目标,阶段二用它提交/回滚。
+	pending_apply applyTarget
+
+	// last_good_mode/submode 是最后一次成功应用的配置,apply 失败时
+	// 回滚到它;只有多于一个 gadget 时才回滚(单个 gadget 无路可退,
+	// 关闭全部 LED 表示失败)。
+	last_good_mode    int
+	last_good_submode int
+	// apply_error 为 true 表示当前 gadget 应用失败且无法回滚,
+	// LED 保持全灭直到下一次成功应用。
+	apply_error atomic.Bool
 
 	// status 是 daemon 状态字符串(mainloop 写、IPC 读,原子):
 	// initing / running / effecting::gadget::mode|submode / shutting_down
@@ -174,6 +187,13 @@ func (this *Daemon) RequestStatus() string {
 type GadgetRequest struct {
 	Spec string
 	Resp chan GadgetResponse
+}
+
+// applyTarget 是一次 gadget 应用的目标(模式索引 + submode),用于
+// 阶段二提交成功状态,以及失败时判断能否回滚。
+type applyTarget struct {
+	mode    int
+	submode int
 }
 
 type GadgetResponse struct {
@@ -363,6 +383,10 @@ func (this *Daemon) SetTurnOffLeds(off bool) {
 // apply_led_state 按 turn_off_leds 立即设置当前 LED:关 / 显示 submode 状态。
 // 由 IPC handler(goroutine)调用;SetMode 会唤醒 LED 事件循环。
 func (this *Daemon) apply_led_state() {
+	if this.apply_error.Load() {
+		this.turn_off_all_leds()
+		return
+	}
 	if interpreter := this.current_interpreter(); interpreter != nil {
 		if this.turn_off_leds.Load() {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
@@ -479,6 +503,9 @@ func (this *Daemon) led_init_indication() {
 	}
 
 	for _, interpreter := range this.interpreters {
+		if this.apply_error.Load() {
+			break // apply 已失败且无法回滚:停止指示,最终保持全灭
+		}
 		if interpreter == nil {
 			continue // LED 初始化失败(如开机时序 sysfs 未就绪),跳过
 		}
@@ -495,6 +522,10 @@ func (this *Daemon) led_init_indication() {
 
 // display_mode_state 按 turn_off_leds/submode 显示当前模式 LED 状态。
 func (this *Daemon) display_mode_state() {
+	if this.apply_error.Load() {
+		this.turn_off_all_leds()
+		return
+	}
 	if !this.turn_off_leds.Load() {
 		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(this.submode_led_mode())
@@ -661,7 +692,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		case "rndis":
 			mode = usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisIcsTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct)
 		case "adb":
-			mode = usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv)
+			mode = usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv, cmd.User, cmd.Group)
 		default:
 			return fmt.Errorf("no such gadget type `%s` (available: rndis, adb)", name)
 		}
@@ -673,6 +704,9 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		this.modes = append(this.modes, mode)
 	}
 	this.set_current_mode(this.current_mode)
+	// 初始视为"最后可用配置",启动首轮失败时没有可回滚目标
+	this.last_good_mode = this.current_mode
+	this.last_good_submode = this.modes[this.current_mode].GetSubmode()
 
 	// ---- initialise LEDs --------------------------------------------------
 
@@ -709,12 +743,25 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 }
 
 func (this *Daemon) apply_function() {
+	// Snapshot the target: the mainloop may change current_mode on new input
+	// while this goroutine rebuilds the gadget.
+	target := applyTarget{
+		mode:    this.current_mode,
+		submode: this.modes[this.current_mode].GetSubmode(),
+	}
+	submode_only := this.submode_changed
+	this.submode_changed = false
+	apply_failed := false
+
 	defer func() {
 		if r := recover(); r != nil {
 			// USB 操作链上的 panic 会杀整个进程,兜底;必须释放模式切换锁,
 			// 否则 mode_changing 卡死,之后再也切不了模式
 			log.Printf("WARN: apply_function panic: %v", r)
-			this.mode_changing = false
+			apply_failed = true
+		}
+		if apply_failed {
+			this.handle_apply_failure(target, submode_only)
 		}
 	}()
 
@@ -722,14 +769,16 @@ func (this *Daemon) apply_function() {
 
 	// submode 切换:函数不变,不重建 gadget(重建会断开对端 RNDIS 网卡,
 	// ICS 需重新就绪,第一次探测必然失败)—— 直接在当前接口上重配网络
-	if this.submode_changed {
-		this.submode_changed = false
+	if submode_only {
 		if interpreter := this.current_interpreter(); interpreter != nil {
 			interpreter.SetMode(led.MODE_PRESET_OFF)
 		}
-		if err := this.controller.ReconfigureFunction(this.modes[this.current_mode]); err != nil {
+		if err := this.controller.ReconfigureFunction(this.modes[target.mode]); err != nil {
 			log.Printf("WARN: cannot reconfigure function: %v\n", err)
+			apply_failed = true
+			return
 		}
+		this.commit_mode(target)
 		if !this.turn_off_leds.Load() {
 			if interpreter := this.current_interpreter(); interpreter != nil {
 				interpreter.SetMode(this.submode_led_mode())
@@ -739,7 +788,7 @@ func (this *Daemon) apply_function() {
 				interpreter.SetMode(led.MODE_PRESET_OFF)
 			}
 		}
-		log.Printf("INFO: submode switched: gadget %s submode %d\n", this.modes[this.current_mode].GetName(), this.modes[this.current_mode].GetSubmode())
+		log.Printf("INFO: submode switched: gadget %s submode %d\n", this.modes[target.mode].GetName(), target.submode)
 		this.mode_changing = false
 		return
 	}
@@ -766,20 +815,25 @@ func (this *Daemon) apply_function() {
 
 	if errs := this.controller.ClearFunctions(); errs != nil {
 		log.Printf("WARN: cannot clear functions: %v\n", errs)
+		apply_failed = true
+		return
 	}
 
-	if err := this.controller.AddFunction(this.modes[this.current_mode]); err != nil {
+	if err := this.controller.AddFunction(this.modes[target.mode]); err != nil {
 		log.Printf("WARN: cannot add function: %v\n", err)
+		apply_failed = true
+		return
 	}
 
 	// 阶段一:重建 gadget(拆旧 → 建骨架 → add/effect)
 	if errs := this.controller.ApplyFunctions(); errs != nil {
 		log.Printf("WARN: cannot apply functions: %v\n", errs)
-		this.mode_changing = false
+		apply_failed = true
 		return
 	}
 
 	// 将稳定等待 deadline 投递给 mainloop,由它的 lazy timer 启动阶段二。
+	this.pending_apply = target
 	select {
 	case this.rebind_chan <- time.Now().Add(this.rebind_delay):
 	case <-this.stop_chan:
@@ -789,16 +843,26 @@ func (this *Daemon) apply_function() {
 // finish_apply 阶段二(由 mainloop 在 rebind 延时到点后启动):绑定 UDC、
 // 跑各函数运行时配置、显示完成态 LED,并释放 mode_changing。
 func (this *Daemon) finish_apply() {
+	target := this.pending_apply
+	apply_failed := false
+
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("WARN: finish_apply panic: %v", r)
-			this.mode_changing = false
+			apply_failed = true
+		}
+		if apply_failed {
+			this.handle_apply_failure(target, false)
 		}
 	}()
 
 	if errs := this.controller.Enable(); errs != nil {
 		log.Printf("WARN: cannot enable gadget: %v\n", errs)
+		apply_failed = true
+		return
 	}
+
+	this.commit_mode(target)
 
 	// 完成态:init 指示走完才显示(否则它会盖掉正在播放的点亮指示)
 	this.apply_done.Store(true)
@@ -806,8 +870,140 @@ func (this *Daemon) finish_apply() {
 		this.display_mode_state()
 	}
 
-	log.Printf("INFO: mode switched: gadget %s submode %d\n", this.modes[this.current_mode].GetName(), this.modes[this.current_mode].GetSubmode())
+	log.Printf("INFO: mode switched: gadget %s submode %d\n", this.modes[target.mode].GetName(), target.submode)
 	this.mode_changing = false
+}
+
+// commit_mode records the last successfully applied configuration.
+func (this *Daemon) commit_mode(target applyTarget) {
+	this.last_good_mode = target.mode
+	this.last_good_submode = target.submode
+	this.apply_error.Store(false)
+}
+
+// should_rollback reports whether a failed apply has a different last working
+// configuration to restore. A single-gadget setup has no alternative.
+func should_rollback(modes_len int, failed, last_good applyTarget) bool {
+	if modes_len <= 1 {
+		return false
+	}
+	return failed.mode != last_good.mode || failed.submode != last_good.submode
+}
+
+// handle_apply_failure rolls back to the last working mode. With only one
+// configured gadget there is nothing to roll back to, so all LEDs are turned
+// off to signal the failure.
+func (this *Daemon) handle_apply_failure(failed applyTarget, submode_only bool) {
+	this.apply_done.Store(true)
+	// Stop the failed target's blink immediately; the restored mode is shown
+	// after rollback.
+	this.turn_off_all_leds()
+
+	can_rollback := should_rollback(len(this.modes), failed, applyTarget{
+		mode:    this.last_good_mode,
+		submode: this.last_good_submode,
+	})
+
+	rolled_back := false
+	if can_rollback {
+		if submode_only {
+			rolled_back = this.rollback_submode()
+		} else {
+			rolled_back = this.rollback_mode()
+		}
+	}
+
+	if rolled_back {
+		this.apply_error.Store(false)
+		log.Printf("WARN: gadget apply failed; rolled back to gadget %s submode %d\n",
+			this.modes[this.last_good_mode].GetName(), this.last_good_submode)
+	} else {
+		this.apply_error.Store(true)
+		if can_rollback {
+			log.Printf("WARN: gadget apply failed; rollback failed, turning off all LEDs\n")
+		} else {
+			log.Printf("WARN: gadget apply failed; no rollback target, turning off all LEDs\n")
+		}
+		// Restore the last known good submode in memory even when the gadget
+		// cannot be rebuilt (single-gadget setup).
+		if this.last_good_mode >= 0 && this.last_good_mode < len(this.modes) && this.modes[this.last_good_mode] != nil {
+			this.modes[this.last_good_mode].SetSubmode(this.last_good_submode)
+		}
+	}
+
+	if this.led_init_done.Load() {
+		this.display_mode_state()
+	}
+	this.mode_changing = false
+}
+
+// rollback_mode rebuilds the last working mode from scratch.
+func (this *Daemon) rollback_mode() bool {
+	if this.last_good_mode < 0 || this.last_good_mode >= len(this.modes) {
+		return false
+	}
+
+	mode := this.modes[this.last_good_mode]
+	if mode == nil {
+		return false
+	}
+	mode.SetSubmode(this.last_good_submode)
+	this.set_current_mode(this.last_good_mode)
+
+	log.Printf("WARN: rolling back to gadget %s submode %d\n", mode.GetName(), this.last_good_submode)
+
+	if errs := this.controller.ClearFunctions(); errs != nil {
+		log.Printf("WARN: rollback clear functions: %v\n", errs)
+		return false
+	}
+	if err := this.controller.AddFunction(mode); err != nil {
+		log.Printf("WARN: rollback add function: %v\n", err)
+		return false
+	}
+	if errs := this.controller.ApplyFunctions(); errs != nil {
+		log.Printf("WARN: rollback apply functions: %v\n", errs)
+		return false
+	}
+
+	if this.rebind_delay > 0 {
+		time.Sleep(this.rebind_delay)
+	}
+	if errs := this.controller.Enable(); errs != nil {
+		log.Printf("WARN: rollback enable gadget: %v\n", errs)
+		return false
+	}
+	return true
+}
+
+// rollback_submode restores the previous submode without rebuilding the
+// gadget (the function itself did not change).
+func (this *Daemon) rollback_submode() bool {
+	if this.last_good_mode < 0 || this.last_good_mode >= len(this.modes) {
+		return false
+	}
+
+	mode := this.modes[this.last_good_mode]
+	if mode == nil {
+		return false
+	}
+	mode.SetSubmode(this.last_good_submode)
+	this.set_current_mode(this.last_good_mode)
+
+	log.Printf("WARN: rolling back submode: gadget %s submode %d\n", mode.GetName(), this.last_good_submode)
+	if err := this.controller.ReconfigureFunction(mode); err != nil {
+		log.Printf("WARN: rollback reconfigure function: %v\n", err)
+		return false
+	}
+	return true
+}
+
+// turn_off_all_leds signals an unrecoverable apply failure.
+func (this *Daemon) turn_off_all_leds() {
+	for _, interpreter := range this.interpreters {
+		if interpreter != nil {
+			interpreter.SetMode(led.MODE_PRESET_OFF)
+		}
+	}
 }
 
 // submode_led_mode 返回当前主模式 submode 对应的 LED 模式。

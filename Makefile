@@ -62,7 +62,7 @@ build/libusbgx/stub/arm64-5.15/libusbgx.so: $(STUB_SRC)
 
 .PHONY: all all-dbus cli-amd64 cli-arm64-5.15 cli-dbus-amd64 cli-dbus-arm64-5.15 clean
 
-all: cli-amd64 cli-arm64-5.15
+all: cli-amd64 cli-arm64-5.15 cli-dbus-amd64 cli-dbus-arm64-5.15
 
 all-dbus: cli-dbus-amd64 cli-dbus-arm64-5.15
 
