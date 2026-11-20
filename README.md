@@ -78,16 +78,20 @@ flowchart TD
 
 ```bash
 make cli-amd64                       # 本机编译
-make cli-arm64-5.15                       # 交叉编译
+make cli-arm64-5.15                  # 交叉编译(glibc 2.31,5.15 镜像)
+make cli-arm64-latest                # 交叉编译(glibc 2.41,新镜像)
+make cli-dbus-amd64                  # D-Bus 版本(其余平台同理:cli-dbus-arm64-*)
 make DEBUG=1 cli-amd64               # 带调试信息(-gcflags=all=-N -l)
 ```
 
-本仓库不携带 libusbgx 源码或二进制:声明按公开 ABI 自写于 `core/usb/gadget/usbg_min.h`,链接期符号由 `core/usb/gadget/libusbgx.symbols`(从设备 so 导出的函数名清单)生成的**空桩 so**(soname `libusbgx.so.2`)提供 —— 运行时由设备预装的 `libusbgx.so.2` 接管。arm64 交叉用 zig(`-target aarch64-linux-gnu.2.31`,设备 glibc 较老)。
+本仓库不携带 libusbgx 源码或二进制:声明按公开 ABI 自写于 `core/usb/gadget/usbg_min.h`,链接期符号由 `core/usb/gadget/libusbgx.symbols`(从设备 so 导出的函数名清单)生成的**空桩 so**(soname `libusbgx.so.2`)提供 —— 运行时由设备预装的 `libusbgx.so.2` 接管。arm64 交叉用 zig:5.15 镜像用 `aarch64-linux-gnu.2.31`,新镜像用 `aarch64-linux-gnu.2.41`(zig 0.14.1 支持的最新 glibc)。
 
-| 产物                    | 说明                                                                  |
-| :---------------------- | :-------------------------------------------------------------------- |
-| `build/amd64/cli`       | 本机编译(动态依赖 libusbgx.so.2)                                      |
-| `build/arm64-5.15/cli`       | 交叉编译到设备架构(动态依赖 libusbgx.so.2,设备镜像预装)               |
+| 产物                          | 说明                                                      |
+| :---------------------------- | :-------------------------------------------------------- |
+| `build/amd64/cli`             | 本机编译(动态依赖 libusbgx.so.2)                          |
+| `build/arm64-5.15/cli`        | 交叉编译,glibc 2.31(5.15 镜像,动态依赖 libusbgx.so.2)     |
+| `build/arm64-latest/cli`      | 交叉编译,glibc 2.41(新镜像,动态依赖 libusbgx.so.2)        |
+| `build/dbus-*/cli`            | 上述平台对应的 D-Bus 版本                                  |
 
 ## 部署
 
@@ -105,9 +109,9 @@ sudo apt install dnsmasq udhcpc iproute2
 
 ### 2. 安装二进制
 
-方式 A:从 [GitHub Releases](https://aka.lovemilk.top/github/wifi-stick-usb-switcher/releases/latest) 下载对应架构的可执行文件(注意不要拿错 `amd64` 版本),解压得到 `cli`。
+方式 A:从 [GitHub Releases](https://aka.lovemilk.top/github/wifi-stick-usb-switcher/releases/latest) 下载对应架构的可执行文件(注意区分 `amd64`、`arm64-5.15` 与 `arm64-latest`),解压得到 `cli`。
 
-方式 B:自行交叉编译,见上文[构建](#构建),产物在 `build/arm64-5.15/cli`。
+方式 B:自行交叉编译,见上文[构建](#构建),产物在 `build/arm64-5.15/cli`(5.15 镜像)或 `build/arm64-latest/cli`(新镜像)。
 
 安装为系统命令(下文以 `/usr/local/bin/usb-switcher` 为例):
 
@@ -374,9 +378,9 @@ tests/virtual-button/   # 虚拟按键注入工具
 | `udhcpc`                |    否    | RNDIS 从模式的 DHCP 探测(`apt install udhcpc`)             |                                   |
 | `iproute2`              |    否    | `ip` 命令,配地址/路由(`apt install iproute2`)              |                                   |
 | `adbd`                  |    是    | ADB 模式下的 device 端守护进程                             |                                   |
-| Zig with aarch64-linux-gnu.2.31 for Linux 5.15 `aarch64-linux-gnu-gcc.2.31` |    否    | 交叉编译 arm64 时需要                                      |                                   |
+| Zig with aarch64-linux-gnu.2.31 / .2.41 |    否    | 交叉编译 arm64 时需要(5.15 镜像 / 新镜像)                  |                                   |
 
-安装 Zig with aarch64-linux-gnu.2.31 for Linux 5.15
+安装 Zig with aarch64-linux-gnu.2.31 / .2.41(5.15 镜像 / 新镜像)
 ```bash
 mkdir -p "$HOME/tools"
 curl -sL -o /tmp/zig.tar.xz \

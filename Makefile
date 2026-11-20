@@ -8,15 +8,20 @@
 # library at runtime. The repo ships neither libusbgx source nor binary.
 #
 # Usage:
-#   make cli-amd64            build IPC transport for the host
-#   make cli-arm64-5.15       cross build IPC transport for the device
-#   make cli-dbus-amd64       build D-Bus transport for the host
-#   make cli-dbus-arm64-5.15  cross build D-Bus transport for the device
-#   make DEBUG=1 cli-amd64    build with debug info (-gcflags=all=-N -l)
+#   make cli-amd64                  build IPC transport for the host
+#   make cli-arm64-5.15             cross build IPC transport (glibc 2.31)
+#   make cli-arm64-latest           cross build IPC transport (glibc 2.41)
+#   make cli-dbus-amd64             build D-Bus transport for the host
+#   make cli-dbus-arm64-5.15        cross build D-Bus transport (glibc 2.31)
+#   make cli-dbus-arm64-latest      cross build D-Bus transport (glibc 2.41)
+#   make DEBUG=1 cli-amd64          build with debug info (-gcflags=all=-N -l)
 
 SHELL := /usr/bin/env bash
 
 BUILD_DIR := build
+
+# `make` without a target builds every variant.
+.DEFAULT_GOAL := all
 
 # ---- version info ---------------------------------------------------------
 
@@ -37,11 +42,11 @@ endif
 SYMBOLS := core/usb/gadget/libusbgx.symbols
 STUB_SRC := build/libusbgx/stub/libusbgx_stub.c
 
-# zig cc cross-compiles to glibc 2.31 for the device (its glibc is older
-# than the dev machine's; fully static glibc cannot coexist with a dynamic
-# libusbgx.so.2 — cgo needs a glibc-2.31-targeting C compiler).
+# zig cc cross-compiles to the device glibc. 2.31 matches the 5.15 image;
+# 2.41 is the newest glibc supported by zig 0.14.1 for newer images.
 ZIG := $(HOME)/tools/zig/zig
-ZIG_TARGET := aarch64-linux-gnu.2.31
+ZIG_TARGET_5_15 := aarch64-linux-gnu.2.31
+ZIG_TARGET_LATEST := aarch64-linux-gnu.2.41
 
 # empty implementations, one per exported symbol name
 $(STUB_SRC): $(SYMBOLS)
@@ -55,16 +60,25 @@ build/libusbgx/stub/amd64/libusbgx.so: $(STUB_SRC)
 
 build/libusbgx/stub/arm64-5.15/libusbgx.so: $(STUB_SRC)
 	mkdir -p $(dir $@)
-	$(ZIG) cc -target $(ZIG_TARGET) -fPIC -shared -Wl,-soname,libusbgx.so.2 -o $@ $(STUB_SRC)
+	$(ZIG) cc -target $(ZIG_TARGET_5_15) -fPIC -shared -Wl,-soname,libusbgx.so.2 -o $@ $(STUB_SRC)
+	ln -sf libusbgx.so $(dir $@)libusbgx.so.2
+
+build/libusbgx/stub/arm64-latest/libusbgx.so: $(STUB_SRC)
+	mkdir -p $(dir $@)
+	$(ZIG) cc -target $(ZIG_TARGET_LATEST) -fPIC -shared -Wl,-soname,libusbgx.so.2 -o $@ $(STUB_SRC)
 	ln -sf libusbgx.so $(dir $@)libusbgx.so.2
 
 # ---- cli ------------------------------------------------------------------
 
-.PHONY: all all-dbus cli-amd64 cli-arm64-5.15 cli-dbus-amd64 cli-dbus-arm64-5.15 clean
+.PHONY: all all-dbus \
+	cli-amd64 cli-arm64-5.15 cli-arm64-latest \
+	cli-dbus-amd64 cli-dbus-arm64-5.15 cli-dbus-arm64-latest \
+	clean
 
-all: cli-amd64 cli-arm64-5.15 cli-dbus-amd64 cli-dbus-arm64-5.15
+all: cli-amd64 cli-arm64-5.15 cli-arm64-latest \
+	cli-dbus-amd64 cli-dbus-arm64-5.15 cli-dbus-arm64-latest
 
-all-dbus: cli-dbus-amd64 cli-dbus-arm64-5.15
+all-dbus: cli-dbus-amd64 cli-dbus-arm64-5.15 cli-dbus-arm64-latest
 
 cli-amd64: build/libusbgx/stub/amd64/libusbgx.so
 	mkdir -p build/amd64
@@ -73,11 +87,19 @@ cli-amd64: build/libusbgx/stub/amd64/libusbgx.so
 
 cli-arm64-5.15: build/libusbgx/stub/arm64-5.15/libusbgx.so
 	mkdir -p build/arm64-5.15
-	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET)" \
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET_5_15)" \
 		CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/arm64-5.15) -lusbgx" \
 		go build "$(GO_BUILD_FLAGS)" \
 		-ldflags "$(BASE_LDFLAGS) -linkmode external" \
 		-o build/arm64-5.15/cli ./cmd/cli.go
+
+cli-arm64-latest: build/libusbgx/stub/arm64-latest/libusbgx.so
+	mkdir -p build/arm64-latest
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET_LATEST)" \
+		CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/arm64-latest) -lusbgx" \
+		go build "$(GO_BUILD_FLAGS)" \
+		-ldflags "$(BASE_LDFLAGS) -linkmode external" \
+		-o build/arm64-latest/cli ./cmd/cli.go
 
 cli-dbus-amd64: build/libusbgx/stub/amd64/libusbgx.so
 	mkdir -p build/dbus-amd64
@@ -86,11 +108,19 @@ cli-dbus-amd64: build/libusbgx/stub/amd64/libusbgx.so
 
 cli-dbus-arm64-5.15: build/libusbgx/stub/arm64-5.15/libusbgx.so
 	mkdir -p build/dbus-arm64-5.15
-	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET)" \
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET_5_15)" \
 		CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/arm64-5.15) -lusbgx" \
 		go build -tags dbus "$(GO_BUILD_FLAGS)" \
 		-ldflags "$(BASE_LDFLAGS) -linkmode external" \
 		-o build/dbus-arm64-5.15/cli ./cmd/cli.go
+
+cli-dbus-arm64-latest: build/libusbgx/stub/arm64-latest/libusbgx.so
+	mkdir -p build/dbus-arm64-latest
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="$(ZIG) cc -target $(ZIG_TARGET_LATEST)" \
+		CGO_LDFLAGS="-L$(abspath build/libusbgx/stub/arm64-latest) -lusbgx" \
+		go build -tags dbus "$(GO_BUILD_FLAGS)" \
+		-ldflags "$(BASE_LDFLAGS) -linkmode external" \
+		-o build/dbus-arm64-latest/cli ./cmd/cli.go
 
 clean:
 	rm -rf build

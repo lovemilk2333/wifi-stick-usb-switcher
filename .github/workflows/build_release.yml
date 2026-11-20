@@ -8,11 +8,6 @@ on:
                 required: false
                 default: ""
                 type: string
-            includes_dbus:
-                description: "Includes D-Bus"
-                required: true
-                default: true
-                type: boolean
 
 permissions:
     contents: write
@@ -34,7 +29,7 @@ jobs:
                   go-version-file: "go.mod"
                   cache: true
 
-            - name: Install Zig (arm64 5.15 cross to glibc 2.31)
+            - name: Install Zig (arm64 cross builds)
               run: |
                   mkdir -p "$HOME/tools"
                   curl -sL -o /tmp/zig.tar.xz \
@@ -43,14 +38,7 @@ jobs:
                   mv "$HOME/tools/zig-x86_64-linux-0.14.1" "$HOME/tools/zig"
                   "$HOME/tools/zig/zig" version
 
-            - name: Run Make
-              run: |
-                  echo "Building..."
-
-                  make all
-
             - name: Build D-Bus variants
-              if: ${{ inputs.includes_dbus }}
               run: |
                   echo "Building D-Bus variants..."
                   make all-dbus
@@ -60,14 +48,10 @@ jobs:
               run: |
                   mkdir -p release_dist
 
-                  tar -I zstd -cvf release_dist/cli-linux-amd64-ipc.tar.zst -C build/amd64 cli
-                  tar -I zstd -cvf release_dist/cli-linux-arm64-ipc.tar.zst -C build/arm64-5.15 cli
-
-                  if [ "${{ inputs.includes_dbus }}" = "true" ]; then
-                    tar -I zstd -cvf release_dist/cli-linux-amd64-dbus.tar.zst -C build/dbus-amd64 cli
-                    tar -I zstd -cvf release_dist/cli-linux-arm64-dbus.tar.zst -C build/dbus-arm64-5.15 cli
-                    cp dbus/io.github.lovemilk2333.wifi-stick-usb-switcher.go.conf release_dist/
-                  fi
+                  tar -I zstd -cvf release_dist/cli-linux-amd64-dbus.tar.zst -C build/dbus-amd64 cli
+                  tar -I zstd -cvf release_dist/cli-linux-arm64-5.15-dbus.tar.zst -C build/dbus-arm64-5.15 cli
+                  tar -I zstd -cvf release_dist/cli-linux-arm64-latest-dbus.tar.zst -C build/dbus-arm64-latest cli
+                  cp dbus/io.github.lovemilk2333.wifi-stick-usb-switcher.go.conf release_dist/
 
                   INPUT_TAG="${{ github.event.inputs.release_tag }}"
                   if [ -n "$INPUT_TAG" ]; then

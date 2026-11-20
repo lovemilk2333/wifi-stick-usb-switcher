@@ -80,7 +80,7 @@ func TestHandleApplyFailureTurnsOffAllLeds(t *testing.T) {
 	if interp.GetMode() != led.MODE_PRESET_OFF {
 		t.Fatal("all LEDs should be off after an unrecoverable apply failure")
 	}
-	if d.mode_changing {
+	if d.mode_changing.Load() {
 		t.Fatal("mode_changing should be released after failure handling")
 	}
 	if !d.apply_done.Load() {

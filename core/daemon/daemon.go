@@ -79,7 +79,7 @@ type Daemon struct {
 	current_mode       int
 	current_mode_rndis atomic.Bool
 	mode_changed       bool
-	mode_changing      bool
+	mode_changing      atomic.Bool
 	// submode 选择中的切换(submode_changed):函数不变,apply_function
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
@@ -156,13 +156,13 @@ type Daemon struct {
 	wake_chan chan struct{}
 }
 
-// update_status 刷新状态字符串(mainloop 线程;effecting 由 apply_function
-// goroutine 置 mode_changing,Tick 读到后反映)。
+// update_status 刷新状态字符串(mainloop 线程;apply goroutine 完成/失败后
+// 会 signal_wake,主循环重新计算状态,避免 status 停留在 effecting)。
 func (this *Daemon) update_status() {
 	switch {
 	case this.shutting_down:
 		this.status.Store("shutting_down")
-	case this.mode_changing:
+	case this.mode_changing.Load():
 		kind := this.effect_kind
 		if kind == "" {
 			kind = "mode"
@@ -765,7 +765,7 @@ func (this *Daemon) apply_function() {
 		}
 	}()
 
-	this.mode_changing = true
+	this.mode_changing.Store(true)
 
 	// submode 切换:函数不变,不重建 gadget(重建会断开对端 RNDIS 网卡,
 	// ICS 需重新就绪,第一次探测必然失败)—— 直接在当前接口上重配网络
@@ -789,7 +789,8 @@ func (this *Daemon) apply_function() {
 			}
 		}
 		log.Printf("INFO: submode switched: gadget %s submode %d\n", this.modes[target.mode].GetName(), target.submode)
-		this.mode_changing = false
+		this.mode_changing.Store(false)
+		this.signal_wake() // refresh status outside the apply goroutine
 		return
 	}
 
@@ -871,7 +872,8 @@ func (this *Daemon) finish_apply() {
 	}
 
 	log.Printf("INFO: mode switched: gadget %s submode %d\n", this.modes[target.mode].GetName(), target.submode)
-	this.mode_changing = false
+	this.mode_changing.Store(false)
+	this.signal_wake() // refresh status outside the apply goroutine
 }
 
 // commit_mode records the last successfully applied configuration.
@@ -934,7 +936,8 @@ func (this *Daemon) handle_apply_failure(failed applyTarget, submode_only bool) 
 	if this.led_init_done.Load() {
 		this.display_mode_state()
 	}
-	this.mode_changing = false
+	this.mode_changing.Store(false)
+	this.signal_wake() // refresh status outside the apply goroutine
 }
 
 // rollback_mode rebuilds the last working mode from scratch.
@@ -1111,9 +1114,9 @@ func (this *Daemon) handle_events() {
 		}
 	}
 
-	if this.mode_changed && !this.mode_changing {
+	if this.mode_changed && !this.mode_changing.Load() {
 		this.mode_changed = false
-		this.mode_changing = true
+		this.mode_changing.Store(true)
 		// 本次 effect 的维度:submode 切换只重配网络,其余走完整重建
 		this.effect_kind = "mode"
 		if this.submode_changed {
