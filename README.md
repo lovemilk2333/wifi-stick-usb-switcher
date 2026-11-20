@@ -60,7 +60,7 @@ flowchart TD
 | RNDIS | 1       | 从模式:udhcpc 探测上游 DHCP → 成功则按 `--rndis-client-ip` 模板配客户端 IP + 默认路由,上游 DNS 直写 `/etc/resolv.conf`(离开时还原);失败则静态接入 Windows ICS 网段 `192.168.137.<client_ip 末字节>/24` 并 UDP 探测 `.1:53`(ICS DNS 代理)验证(见下) |
 | ADB   | 0       | ADB 模式,无子模式                                                                                                            |
 
-- 从模式三级探测:DHCP 不可用(超时、掩码非连续、前缀 ≥ /30)→ 静态配 `192.168.137.xx/24`(xx 取 `--rndis-client-ip` 末字节)并 UDP 探测 `192.168.137.1:53`(Windows ICS 共享端固定地址,其 DNS 代理固定监听 53)——不用 ping 探测:实测从模式下主机能 ping 通 stick、stick ping 不通 `.1`(Win7 侧对入站 ICMP 无响应),而 UDP 探测只依赖 ICS 必有组件 → DNS 代理不通(host 既无 DHCP 也没开 ICS)才回退网关模式,保证 stick 始终可达。
+- 从模式先探测上游 DHCP。DHCP 不可用(超时、掩码非连续、前缀 ≥ /30)时，静态配 `192.168.137.xx/24`(xx 取 `--rndis-client-ip` 末字节)，并用 UDP 探测 Windows ICS 的 DNS 代理 `192.168.137.1:53`。静态配置或探测失败时默认回退网关模式 `rndis.0`。启用 `--submode-no-fallback`（`-N`）后，最终失败时保留请求的 `rndis.1`，每次失败后等待 `--submode-retry-interval` 再重试，直到成功或收到新的切换请求。
 - 子模式通过 `MaxSubmode()` 有界循环(`RNDIS` 0↔1),`enable()` 只会看到合法值。
 
 ## LED 显示
@@ -235,6 +235,8 @@ gdbserver 调试示例见 `scripts/test-gdbserver.sh.example`。`tests/virtual-b
 | `--led-blink-duration`     | `100ms`                            | 模式切换快闪的亮时长                                |
 | `--led-blink-interval`     | `300ms`                            | 模式切换快闪的灭时长                                |
 | `--submode-led-duration`   | `750ms`                            | 进入/退出子模式选择时 LED 的关闭提示时长            |
+| `-N, --submode-no-fallback` | `false`                            | 子模式切换失败时保留请求的子模式，禁止自动回退到同一 gadget 的其他子模式 |
+| `--submode-retry-interval` | `90s`                              | 启用 `-N` 时，每次失败后到下次重试的等待时间，`0s` 禁用重试 |
 | `-c, --config-fs`          | `/sys/kernel/config/usb_gadget/g1` | configfs 路径(不存在时由 libusbgx 创建)             |
 | `--rndis-device-mac`       | `02:12:34:56:78:9a`                | 设备侧 RNDIS 接口 MAC                               |
 | `--rndis-host-mac`         | `02:98:76:54:32:10`                | 电脑侧可见的 MAC                                    |
@@ -291,7 +293,7 @@ Caddy 可将 `get_certificate http` 指向 `http://127.0.0.1:50996/generate`，�
 | `led`        | `on` / `1`          | 开启 LED(立即生效)                                           | `led: on`              |
 | `gadget`     | 无                  | 查询当前 gadget(名称 + submode)                              | `gadget: rndis.1`      |
 | `gadget`     | `name[.submode]`    | 切换 gadget:换模式走完整重建;仅换 submode 不重建(直接重配网络) | `gadget: rndis.1`      |
-| `status`     | 无                  | 查询 daemon 状态:`initing` / `running` / `effecting::gadget::mode`(重建)/ `effecting::gadget::submode`(重配网络)/ `shutting_down`;当前是哪个 gadget 用 `gadget` 查 | `status: running`      |
+| `status`     | 无                  | 查询 daemon 状态。可返回 `initing`、`running`、`effecting::gadget::mode`（重建）、`effecting::gadget::submode`（重配网络）、`failed::gadget`（应用失败且未恢复，包括等待重试期间）或 `shutting_down` | `status: running`      |
 | `tap`        | `tap`/`long`/`multi n` | 注入虚拟按键(测试用)                                        | `button: tap` 等       |
 
 | 参数                | 默认值 | 说明              |

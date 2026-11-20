@@ -32,6 +32,8 @@ type DaemonCmd struct {
 	LedBlinkDuration     time.Duration    `arg:"--led-blink-duration" help:"led blink duration, the light duration of led when blinking" default:"100ms"`
 	LedBlinkInterval     time.Duration    `arg:"--led-blink-interval" help:"led blink interval, the dark duration of led when blinking" default:"300ms"`
 	SubmodeLedDuration   time.Duration    `arg:"--submode-led-duration" help:"led off duration when entering submode selection, before showing the submode state" default:"750ms"`
+	SubmodeNoFallback    bool             `arg:"-N,--submode-no-fallback" help:"keep the requested submode when applying it fails"`
+	SubmodeRetryInterval time.Duration    `arg:"--submode-retry-interval" default:"90s" help:"delay before retrying a retained submode with -N (0 disables retries)"`
 	UsbConfigFs          string           `arg:"-c,--config-fs" default:"/sys/kernel/config/usb_gadget/g1" help:"usb config-fs path, such as /sys/kernel/config/usb_gadget/g1"`
 	Gadgets              []string         `arg:"--gadget,separate" help:"gadget sequence, repeatable, order = switch order; name[.submode], e.g. --gadget rndis --gadget adb (default), --gadget rndis.1 for the client submode"`
 	RndisDeviceMac       net.HardwareAddr `arg:"--rndis-device-mac" default:"02:12:34:56:78:9a" help:"the mac address of current device rndis network interface"`
@@ -83,9 +85,12 @@ type Daemon struct {
 	// submode 选择中的切换(submode_changed):函数不变,apply_function
 	// 不重建 gadget,直接在当前接口上重配网络 —— 重建会断开对端 RNDIS
 	// 网卡(Windows 侧重新枚举,ICS 需重新就绪,DHCP 探测必失败)。
-	submode_changed bool
-	reapply         bool // 双击手动重新 effect:重建期间 LED 一律快闪
-	first_apply     bool // 启动首轮应用:不动 LED,交给并行的 init 指示
+	submode_changed        bool
+	submode_no_fallback    bool
+	submode_retry_interval time.Duration
+	submode_retry          atomic.Pointer[submodeRetry]
+	reapply                bool // 双击手动重新 effect:重建期间 LED 一律快闪
+	first_apply            bool // 启动首轮应用:不动 LED,交给并行的 init 指示
 	// 启动窗口协调:init 指示(逐颗点亮)与 gadget 应用并行,两侧都以
 	// 原子标志等对方完成后再显示模式状态
 	apply_done           atomic.Bool
@@ -143,7 +148,7 @@ type Daemon struct {
 	apply_error atomic.Bool
 
 	// status 是 daemon 状态字符串(mainloop 写、IPC 读,原子):
-	// initing / running / effecting::gadget::mode|submode / shutting_down
+	// initing / running / effecting::gadget::mode|submode / failed::gadget / shutting_down
 	status atomic.Value
 	// effect_kind 是本次 effect 的维度(mode=重建 / submode=重配网络),
 	// 供 status 区分;具体 gadget 值用 `ipc gadget` 查
@@ -168,6 +173,8 @@ func (this *Daemon) update_status() {
 			kind = "mode"
 		}
 		this.status.Store("effecting::gadget::" + kind)
+	case this.apply_error.Load():
+		this.status.Store("failed::gadget")
 	default:
 		this.status.Store("running")
 	}
@@ -194,6 +201,12 @@ type GadgetRequest struct {
 type applyTarget struct {
 	mode    int
 	submode int
+}
+
+type submodeRetry struct {
+	target   applyTarget
+	deadline time.Time
+	in_place bool
 }
 
 type GadgetResponse struct {
@@ -441,6 +454,11 @@ func (this *Daemon) Mainloop() error {
 		if this.pending_enable {
 			deadline = this.enable_deadline
 		}
+		if !this.mode_changing.Load() {
+			if retry := this.submode_retry.Load(); retry != nil && (deadline.IsZero() || retry.deadline.Before(deadline)) {
+				deadline = retry.deadline
+			}
+		}
 		if this.shutdown_threshold > 0 && !this.shutting_down {
 			if st := this.input_device.State(); st != nil {
 				shutdown_deadline := st.Time.Add(this.shutdown_threshold - st.Duration)
@@ -593,6 +611,10 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 	if cmd.RndisIcsTimeout <= 0 {
 		return fmt.Errorf("`--rndis-ics-timeout` must be positive")
 	}
+	if cmd.SubmodeRetryInterval < 0 {
+		return fmt.Errorf("`--submode-retry-interval` cannot be negative")
+	}
+	this.submode_retry_interval = cmd.SubmodeRetryInterval
 
 	// 长按关机阈值必须大于长按阈值,否则长按会先触发子模式选择再触发关机
 	if cmd.ShutdownThreshold > 0 && cmd.ShutdownThreshold <= cmd.LongTapThreshold {
@@ -653,6 +675,7 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		return fmt.Errorf("`--rebind-delay` cannot be negative")
 	}
 	this.rebind_delay = cmd.RebindDelay
+	this.submode_no_fallback = cmd.SubmodeNoFallback
 
 	controller, err := usb.NewUsbGadgetController(cmd.UsbConfigFs)
 	if err != nil {
@@ -690,7 +713,9 @@ func (this *Daemon) init(cmd *DaemonCmd) error {
 		var mode usb.UsbGadgetFunction
 		switch name {
 		case "rndis":
-			mode = usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisIcsTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct)
+			rndis := usb.NewUsbGadgetRndis(rndisIP, base.PROJECT_IDENT+"_", cmd.RndisDeviceMac.String(), cmd.RndisHostMac.String(), cmd.RndisUsbIfname, rndis_qmult, cmd.DnsmasqArgs, rndisClientIP, cmd.RndisClientTimeout, cmd.RndisIcsTimeout, cmd.RndisSerialNumber, cmd.RndisManufacturer, cmd.RndisProduct)
+			rndis.SetSubmodeNoFallback(cmd.SubmodeNoFallback)
+			mode = rndis
 		case "adb":
 			mode = usb.NewUsbGadgetAdb("/dev/usb-ffs/adb", cmd.AdbSerialNumber, cmd.AdbManufacturer, cmd.AdbProduct, cmd.AdbEnv, cmd.User, cmd.Group)
 		default:
@@ -761,7 +786,7 @@ func (this *Daemon) apply_function() {
 			apply_failed = true
 		}
 		if apply_failed {
-			this.handle_apply_failure(target, submode_only)
+			this.handle_apply_failure(target, submode_only, submode_only)
 		}
 	}()
 
@@ -846,6 +871,7 @@ func (this *Daemon) apply_function() {
 func (this *Daemon) finish_apply() {
 	target := this.pending_apply
 	apply_failed := false
+	usb_bound := false
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -853,11 +879,14 @@ func (this *Daemon) finish_apply() {
 			apply_failed = true
 		}
 		if apply_failed {
-			this.handle_apply_failure(target, false)
+			this.handle_apply_failure(target, false, usb_bound)
 		}
 	}()
 
 	if errs := this.controller.Enable(); errs != nil {
+		// Function configuration errors are returned after binding the UDC.
+		_, bind_failed := errs["enable_gadget"]
+		usb_bound = !bind_failed
 		log.Printf("WARN: cannot enable gadget: %v\n", errs)
 		apply_failed = true
 		return
@@ -892,10 +921,9 @@ func should_rollback(modes_len int, failed, last_good applyTarget) bool {
 	return failed.mode != last_good.mode || failed.submode != last_good.submode
 }
 
-// handle_apply_failure rolls back to the last working mode. With only one
-// configured gadget there is nothing to roll back to, so all LEDs are turned
-// off to signal the failure.
-func (this *Daemon) handle_apply_failure(failed applyTarget, submode_only bool) {
+// handle_apply_failure restores the last working mode when rollback is allowed.
+// All LEDs stay off if the failure cannot be recovered.
+func (this *Daemon) handle_apply_failure(failed applyTarget, submode_only, retry_in_place bool) {
 	this.apply_done.Store(true)
 	// Stop the failed target's blink immediately; the restored mode is shown
 	// after rollback.
@@ -905,9 +933,15 @@ func (this *Daemon) handle_apply_failure(failed applyTarget, submode_only bool) 
 		mode:    this.last_good_mode,
 		submode: this.last_good_submode,
 	})
+	has_last_good := this.last_good_mode >= 0 && this.last_good_mode < len(this.modes) && this.modes[this.last_good_mode] != nil
+	skip_fallback := this.submode_no_fallback && submode_only
+	if this.submode_no_fallback && !skip_fallback && has_last_good && failed.submode != this.last_good_submode {
+		// Separate entries in the gadget sequence can select the same function.
+		skip_fallback = this.modes[failed.mode].GetName() == this.modes[this.last_good_mode].GetName()
+	}
 
 	rolled_back := false
-	if can_rollback {
+	if can_rollback && !skip_fallback {
 		if submode_only {
 			rolled_back = this.rollback_submode()
 		} else {
@@ -921,15 +955,25 @@ func (this *Daemon) handle_apply_failure(failed applyTarget, submode_only bool) 
 			this.modes[this.last_good_mode].GetName(), this.last_good_submode)
 	} else {
 		this.apply_error.Store(true)
-		if can_rollback {
+		if skip_fallback {
+			log.Printf("WARN: gadget apply failed; submode fallback disabled, turning off all LEDs\n")
+		} else if can_rollback {
 			log.Printf("WARN: gadget apply failed; rollback failed, turning off all LEDs\n")
 		} else {
 			log.Printf("WARN: gadget apply failed; no rollback target, turning off all LEDs\n")
 		}
 		// Restore the last known good submode in memory even when the gadget
 		// cannot be rebuilt (single-gadget setup).
-		if this.last_good_mode >= 0 && this.last_good_mode < len(this.modes) && this.modes[this.last_good_mode] != nil {
+		if !skip_fallback && has_last_good {
 			this.modes[this.last_good_mode].SetSubmode(this.last_good_submode)
+		}
+		if this.submode_no_fallback && this.submode_retry_interval > 0 &&
+			(skip_fallback || !can_rollback && this.modes[failed.mode].MaxSubmode() > 0) {
+			this.submode_retry.Store(&submodeRetry{
+				target:   failed,
+				deadline: time.Now().Add(this.submode_retry_interval),
+				in_place: retry_in_place,
+			})
 		}
 	}
 
@@ -1114,6 +1158,7 @@ func (this *Daemon) handle_events() {
 		}
 	}
 
+	this.queue_due_submode_retry(time.Now())
 	if this.mode_changed && !this.mode_changing.Load() {
 		this.mode_changed = false
 		this.mode_changing.Store(true)
@@ -1122,6 +1167,7 @@ func (this *Daemon) handle_events() {
 		if this.submode_changed {
 			this.effect_kind = "submode"
 		}
+		this.update_status()
 
 		for _, interpreter := range this.interpreters {
 			if interpreter != nil {
@@ -1131,6 +1177,28 @@ func (this *Daemon) handle_events() {
 
 		go this.apply_function()
 	}
+}
+
+// queue_due_submode_retry runs after user input and IPC so a new request takes precedence.
+func (this *Daemon) queue_due_submode_retry(now time.Time) {
+	if this.mode_changing.Load() {
+		return
+	}
+	retry := this.submode_retry.Load()
+	if retry == nil {
+		return
+	}
+	if this.mode_changed || this.current_mode != retry.target.mode ||
+		this.modes[this.current_mode].GetSubmode() != retry.target.submode {
+		this.submode_retry.Store(nil)
+		return
+	}
+	if now.Before(retry.deadline) {
+		return
+	}
+	this.submode_retry.Store(nil)
+	this.mode_changed = true
+	this.submode_changed = retry.in_place
 }
 
 func (this *Daemon) start_led_interpreters() {

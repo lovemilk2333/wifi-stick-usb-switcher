@@ -22,11 +22,12 @@ import (
 // type Usb
 
 type UsbGadgetRndis struct {
-	ip_addr           netip.Prefix
-	connection_prefix string
-	client_ip         netip.Addr    // 从模式 IP 模板(--rndis-client-ip):0 字节取上游网段字节;主机字节用于无 DHCP 时的 ICS 静态探测(192.168.137.xx)
-	client_timeout    time.Duration // 从模式总超时:等网卡出现 + DHCP 探测(--rndis-client-timeout)
-	ics_timeout       time.Duration // ICS 静态网关探测超时(--rndis-ics-timeout)
+	ip_addr             netip.Prefix
+	connection_prefix   string
+	client_ip           netip.Addr    // 从模式 IP 模板(--rndis-client-ip):0 字节取上游网段字节;主机字节用于无 DHCP 时的 ICS 静态探测(192.168.137.xx)
+	client_timeout      time.Duration // 从模式总超时:等网卡出现 + DHCP 探测(--rndis-client-timeout)
+	ics_timeout         time.Duration // ICS 静态网关探测超时(--rndis-ics-timeout)
+	submode_no_fallback bool
 
 	dev_addr     string
 	host_addr    string
@@ -45,6 +46,12 @@ type UsbGadgetRndis struct {
 // GetIfname 返回当前 RNDIS 接口名(绑定后可能被 resolve_ifname 更新)。
 func (this *UsbGadgetRndis) GetIfname() string {
 	return this.ifname
+}
+
+// SetSubmodeNoFallback configures whether client mode failures can select gateway mode.
+// Call before applying the gadget.
+func (this *UsbGadgetRndis) SetSubmodeNoFallback(disabled bool) {
+	this.submode_no_fallback = disabled
 }
 
 // dnsmasq_pid_file 返回本实例的 dnsmasq pid 文件路径 — 随接口名动态,
@@ -210,7 +217,7 @@ func (this *UsbGadgetRndis) enable_gateway_mode(ifname string) error {
 // enable_client_mode 从模式:优先 udhcpc 从上游拿 DHCP(Windows ICS /
 // 路由器);拿不到可用租约时静态接入 Windows ICS 网段并 ping 网关
 // 验证(host 开了共享但 DHCP 分配器不可用时链路仍可达);仍不通才
-// 回退主模式,保证 stick 始终可达。
+// 按配置回退网关模式或返回错误。
 func (this *UsbGadgetRndis) enable_client_mode(ifname string) error {
 	// submode 直切(不重建 gadget)时主模式的 dnsmasq 还在接口上跑,
 	// 从模式是 DHCP 客户端,先停掉本机 DHCP 服务器(幂等,完整重建
@@ -276,7 +283,7 @@ func (this *UsbGadgetRndis) apply_dhcp_lease(ifname string, subnet, router netip
 // --rndis-client-ip 的主机字节配 192.168.137.xx/24(ICS 共享端固定
 // 192.168.137.1/24),DNS 探测网关确认 ICS 真在(host 开了共享但 DHCP
 // 分配器不可用时链路仍可达);探测失败说明 host 既无 DHCP 也没开
-// ICS,回退主模式保可达。不用 ping 探测:Win7 防火墙默认丢入站 ICMP
+// ICS,默认回退主模式保可达。不用 ping 探测:Win7 防火墙默认丢入站 ICMP
 // (实测主机能 ping 通 stick、stick ping 不通 .1,但 TCP/UDP 正常)。
 func (this *UsbGadgetRndis) enable_ics_static_mode(ifname string) error {
 	gateway := netip.AddrFrom4([4]byte{192, 168, 137, 1})
@@ -290,13 +297,11 @@ func (this *UsbGadgetRndis) enable_ics_static_mode(ifname string) error {
 		log.Printf("WARN: `ip addr flush dev %s`: %v, output: %s\n", ifname, err, string(out))
 	}
 	if err := add_iface_addr(ifname, ipSpec); err != nil {
-		log.Printf("WARN: %v, fallback to gateway mode\n", err)
-		return this.fallback_to_gateway_mode()
+		return this.fallback_to_gateway_mode(err)
 	}
 
 	if !this.probe_ics_dns(gateway, this.ics_timeout) {
-		log.Printf("WARN: ics gateway %s has no DNS proxy, fallback to gateway mode\n", gateway)
-		return this.fallback_to_gateway_mode()
+		return this.fallback_to_gateway_mode(fmt.Errorf("ics gateway %s has no DNS proxy", gateway))
 	}
 
 	if out, err := exec.Command("ip", "route", "add", "default", "via", gateway.String(), "dev", ifname).CombinedOutput(); err != nil {
@@ -350,7 +355,11 @@ func dns_query(name string) []byte {
 
 // fallback_to_gateway_mode 从模式回退:submode 直接跳回 0(回退后 LED 显示
 // 与后续 effect 都回到主模式),再走主模式逻辑。
-func (this *UsbGadgetRndis) fallback_to_gateway_mode() error {
+func (this *UsbGadgetRndis) fallback_to_gateway_mode(err error) error {
+	if this.submode_no_fallback {
+		return err
+	}
+	log.Printf("WARN: %v, fallback to gateway mode\n", err)
 	this.SetSubmode(0)
 	return this.enable_gateway_mode(this.ifname)
 }
